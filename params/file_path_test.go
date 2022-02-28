@@ -11,6 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestBuildFailure(t *testing.T) {
+	t.FailNow()
+}
+
 func TestPipe(t *testing.T) {
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
