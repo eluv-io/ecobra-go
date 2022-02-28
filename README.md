@@ -1,5 +1,7 @@
 # ecobra
 
+[![](https://github.com/eluv-io/ecobra-go/actions/workflows/build.yaml/badge.svg)](https://github.com/eluv-io/ecobra-go/actions?query=workflow%3Abuild)
+
 Module `eluv-io/ecobra-go` provides packages easing work with [cobra](https://github.com/spf13/cobra):
 
 * `bflags`: a framework for binding command line flags and parameters to fields of structs
@@ -10,7 +12,7 @@ Module `eluv-io/ecobra-go` provides packages easing work with [cobra](https://gi
 
 ### bflags
 
-Package `bflags` provides binding of command line flags and parameters to fields of structs through annotations tags. 
+Package `bflags` provides binding of command line flags and parameters to fields of structs through annotations tags.
 
 Tags are specified using 'cmd' followed by either 'flag' or 'arg' and then flags attributes:
 
@@ -134,7 +136,7 @@ func main() {
 	if err != nil {
 		exit(err)
 	}
-	
+
 	// optionally initialize a command context to pass global value to any command
 	cmdCtx := app.NewCmdCtx()
 	//cmdCtx.Set("some key", someValue)
