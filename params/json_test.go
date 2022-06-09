@@ -49,6 +49,27 @@ func TestJson(t *testing.T) {
 	require.True(t, mjp["rgb"].(bool))
 }
 
+func TestJson_Interface(t *testing.T) {
+	tests := []struct {
+		s    string
+		want interface{}
+	}{
+		{`5.4`, 5.4},
+		{`true`, true},
+		{`"a string"`, "a string"},
+		{`{"k1":"v1","k2":"v2"}`, map[string]interface{}{"k1": "v1", "k2": "v2"}},
+		{`["v1","v2","v3"]`, []interface{}{"v1", "v2", "v3"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.s, func(t *testing.T) {
+			val, err := Json(test.s).Interface()
+			require.NoError(t, err)
+			require.Equal(t, test.want, val)
+		})
+	}
+}
+
 func TestEmptyJson(t *testing.T) {
 	js := Json("")
 	mj, err := js.Map()
