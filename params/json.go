@@ -12,6 +12,26 @@ import (
 // - from piped input: "-"
 type Json string
 
+// Interface unmarshals this JSON string into an empty interface{}.
+// If the string value starts with '@', it looks for a file with that name and
+// uses the content of the file.
+func (j Json) Interface() (interface{}, error) {
+	e := errors.Template("interface", errors.K.IO, "json", j)
+	bb, err := BytesFrom(string(j))
+	if err != nil {
+		return nil, err
+	}
+	if len(bb) == 0 {
+		return nil, nil
+	}
+	var m interface{}
+	err = json.Unmarshal(bb, &m)
+	if err != nil {
+		return nil, e(err)
+	}
+	return m, nil
+}
+
 // Map returns the content of the Json string as a map[string]interface
 // If the string value starts with '@', it looks for a file with that name and
 // uses the content of the file.
