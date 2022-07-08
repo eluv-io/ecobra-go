@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 
 	"github.com/eluv-io/ecobra-go/bflags"
+	"github.com/eluv-io/errors-go"
 )
 
 func SpecOf(cmd *cobra.Command) *spec {
@@ -27,6 +27,8 @@ func SpecOf(cmd *cobra.Command) *spec {
 	}
 	return s
 }
+
+var _ = SpecOf
 
 // ----- Runtime -----
 
@@ -136,6 +138,8 @@ func RtFunctions(
 }
 
 // ----- spec -----
+
+// SpecKey is the context key for the spec
 const SpecKey = "$spec"
 
 type spec struct {
@@ -169,7 +173,7 @@ func (s *spec) String() string {
 	return string(res)
 }
 
-// not intended to be called
+// Set is needed to satisfy the Value interface but is not intended to be called
 func (s *spec) Set(string) error {
 	return errors.E("spec.Set", errors.K.Invalid)
 }
@@ -181,7 +185,7 @@ func (s *spec) Type() string {
 // ----- App -----
 
 type CobraFunction func(cmd *cobra.Command, args []string) error
-type CommandStart func(cmd *cobra.Command)
+type CommandStart func(cmd *cobra.Command, flagsAndArgs map[string]string, in interface{})
 type CommandEnd func(cmd *cobra.Command, out interface{}, err error)
 
 type App struct {
@@ -262,6 +266,11 @@ func (a *App) Cobra() (*cobra.Command, error) {
 	return a.root, nil
 }
 
+func (a *App) NewCobra() (*cobra.Command, error) {
+	a.root = nil
+	return a.Cobra()
+}
+
 func (a *App) configureHelp() {
 	// configure categories and template functions
 	if len(a.spec.Categories) > 0 {
@@ -294,13 +303,16 @@ func (a *App) configureHelp() {
 	configureHelp(a.root)
 }
 
-func (a *App) Command(path []string) (*Cmd, error) {
+func (a *App) Command(path ...string) (*Cmd, error) {
 	e := errors.Template("Command", errors.K.Invalid, "path", strings.Join(path, ","))
 	if len(path) == 0 {
-		return nil, e("reason", "empty path")
+		return a.spec.CmdRoot, nil
 	}
-	if path[0] != a.root.Name() {
+	if path[0] != a.spec.CmdRoot.Name() {
 		return nil, e(errors.K.NotExist)
+	}
+	if len(path) == 1 {
+		return a.spec.CmdRoot, nil
 	}
 	return a.spec.CmdRoot.Sub(path[1:])
 }
@@ -315,6 +327,10 @@ func (a *App) SetCommandEnd(cmdEnd CommandEnd) {
 
 func (a *App) onExit() {
 	a.printResults("exit signal")
+}
+
+func (a *App) getResults() []*CmdResult {
+	return a.results
 }
 
 func (a *App) printResults(reason string) {
@@ -371,6 +387,7 @@ func (a *App) runStub(fn interface{}, name string) CobraFunction {
 			}
 			ctx.Set(CtxAddResultFn, arfn)
 			ctx.Set(CtxPrintResultFn, a.printResults)
+			ctx.Set(CtxGetResultFn, a.getResults)
 		}
 		m, err := bflags.SetArgs(cmd, args)
 		if err != nil {
@@ -394,7 +411,7 @@ func (a *App) runStub(fn interface{}, name string) CobraFunction {
 			return e(err)
 		}
 		if a.cmdStart != nil {
-			a.cmdStart(cmd)
+			a.cmdStart(cmd, bflags.GetFlagArgSet(cmd), m)
 		}
 
 		res, err := a.callFn(name, f, ctx, m)
@@ -469,6 +486,8 @@ func (a *App) callFn(name string, fn reflect.Value, params ...interface{}) (v []
 }
 
 // ----- Cmd -----
+
+// ValidatorCtor is a constructor validator
 type ValidatorCtor func(c *cobra.Command) func(c *cobra.Command, args []string) error
 
 type CobraFunc struct {
@@ -847,21 +866,25 @@ func (c *Cmd) ToCobra(parent *cobra.Command, f bflags.Flagger) (*cobra.Command, 
 	return cmd, nil
 }
 
-// Results book keeping
+// AddResultFn and PrintResultFn are function for results book keeping
 type AddResultFn func(key string, out interface{}, err error)
 type PrintResultFn func(results []*CmdResult)
 
 type CmdResult struct {
-	Key    string
-	Result interface{}
-	Error  error
+	Key    string      `json:"key"`
+	Result interface{} `json:"result,omitempty"`
+	Error  string      `json:"error,omitempty"`
 }
 
 func newCommandResult(key string, out interface{}, err error) *CmdResult {
+	serr := ""
+	if err != nil {
+		serr = fmt.Sprintf("%v", err)
+	}
 	return &CmdResult{
 		Key:    key,
 		Result: out,
-		Error:  err,
+		Error:  serr,
 	}
 }
 
@@ -887,7 +910,7 @@ func (r *CmdResult) String() string {
 	ret := fmt.Sprintf("%s: %s", r.Key, res)
 
 	serr := ""
-	if r.Error != nil {
+	if len(r.Error) > 0 {
 		serr = fmt.Sprintf("error: %v", r.Error)
 	}
 	if serr != "" {

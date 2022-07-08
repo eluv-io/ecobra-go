@@ -12,10 +12,11 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/eluv-io/errors-go"
-	elog "github.com/eluv-io/log-go"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+
+	"github.com/eluv-io/errors-go"
+	elog "github.com/eluv-io/log-go"
 )
 
 const (
@@ -146,15 +147,16 @@ func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
 
 	name := cmdFlag(spec.getName())
 	fb := &FlagBond{
-		isArg:      isArg,
-		Name:       name,
-		Shorthand:  short,
-		Value:      ptr,
-		Usage:      spec.getDescription(),
-		Required:   required,
-		Persistent: persistent,
-		Hidden:     hidden,
-		ArgOrder:   order,
+		isArg:       isArg,
+		Name:        name,
+		Shorthand:   short,
+		Value:       ptr,
+		Usage:       spec.getDescription(),
+		Required:    required,
+		Persistent:  persistent,
+		Hidden:      hidden,
+		ArgOrder:    order,
+		Annotations: spec.getAnnotations(),
 	}
 
 	if spec.kind() == flagTag {
@@ -538,12 +540,15 @@ func typeByIndex(t reflect.Type, index []int) reflect.Type {
 /* tag spec
 
 cmd:"arg,id,content id,0"
-cmd:"flag,id,content id, i,true,true"
+cmd:"flag,id,content id, i,true,true,true"
 
+meta:"val1,val2"
 */
 const (
+	cmdTag  = "cmd"
 	argTag  = "arg"
 	flagTag = "flag"
+	metaTag = "meta"
 )
 
 type cmdSpec interface {
@@ -551,13 +556,15 @@ type cmdSpec interface {
 	getName() string
 	setName(s string)
 	getDescription() string
+	getAnnotations() []string
 }
 
 // cmd:"arg,[name, description, [order]]"
 type argSpec struct {
-	name        string // name of the flag or arg parameter
-	description string // description
-	order       int    // optional order on command line
+	name        string   // name of the flag or arg parameter
+	description string   // description
+	order       int      // optional order on command line
+	annotations []string // annotations
 }
 
 func (a *argSpec) kind() string {
@@ -573,15 +580,19 @@ func (a *argSpec) setName(s string) {
 func (a *argSpec) getDescription() string {
 	return a.description
 }
+func (a *argSpec) getAnnotations() []string {
+	return a.annotations
+}
 
-// cmd:"flag,name[, description, short hand, persistent=false, required=false]"
+// cmd:"flag,name[, description, short hand, persistent=false, required=false, hidden=false]" meta:"val1,val2,val3"
 type flagSpec struct {
-	name        string // name of the flag or arg parameter
-	description string // description: used for usage
-	shorthand   string // one letter short hand or the empty sting for none
-	persistent  bool   // true: the flag is available to the command as well as every command under the command
-	required    bool   // true if the flag is required
-	hidden      bool   // true if the flag is hidden
+	name        string   // name of the flag or arg parameter
+	description string   // description: used for usage
+	shorthand   string   // one letter short hand or the empty sting for none
+	persistent  bool     // true: the flag is available to the command as well as every command under the command
+	required    bool     // true if the flag is required
+	hidden      bool     // true if the flag is hidden
+	annotations []string // annotations
 }
 
 func (a *flagSpec) kind() string {
@@ -596,6 +607,9 @@ func (a *flagSpec) setName(s string) {
 }
 func (a *flagSpec) getDescription() string {
 	return a.description
+}
+func (a *flagSpec) getAnnotations() []string {
+	return a.annotations
 }
 
 // A field represents a single field found in a struct.
@@ -674,7 +688,7 @@ func typeFields(t reflect.Type) []field {
 				}
 				spec := parseFieldTag(sf)
 				if spec == nil && !sf.Anonymous {
-					// accept non anonymous inner struct
+					// accept non-anonymous inner struct
 					toCont := true
 					t := sf.Type
 					if t.Kind() == reflect.Ptr {
@@ -799,7 +813,7 @@ func isValidTag(s string) bool {
 }
 
 func parseFieldTag(sf reflect.StructField) cmdSpec {
-	tag := sf.Tag.Get("cmd")
+	tag := sf.Tag.Get(cmdTag)
 	if tag == "-" || tag == "" {
 		return nil
 	}
@@ -814,6 +828,12 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 		name = sf.Name
 	}
 
+	var annotations []string
+	annot := strings.Trim(sf.Tag.Get(metaTag), " ")
+	if annot != "" {
+		annotations = splitString(annot)
+	}
+
 	switch kind {
 	case "":
 		fallthrough //default to 'arg'
@@ -826,6 +846,7 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 			name:        name,
 			description: description,
 			order:       order,
+			annotations: annotations,
 		}
 	case flagTag:
 		persistent, _ := strconv.ParseBool(opts.At(3))
@@ -838,10 +859,19 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 			persistent:  persistent,
 			required:    required,
 			hidden:      hidden,
+			annotations: annotations,
 		}
 	default:
 		return nil
 	}
+}
+
+func splitString(s string) []string {
+	ret := strings.Split(s, ",")
+	for i, r := range ret {
+		ret[i] = strings.Trim(r, " ")
+	}
+	return ret
 }
 
 // tagOptions is the string following a comma in a struct field's "cmd" tag
@@ -852,7 +882,7 @@ type tagOptions []string
 // options.
 func parseTag(tag string) (string, tagOptions) {
 	if idx := strings.Index(tag, ","); idx != -1 {
-		return tag[:idx], strings.Split(tag[idx+1:], ",")
+		return tag[:idx], splitString(tag[idx+1:])
 	}
 	return tag, []string{}
 }
@@ -884,11 +914,15 @@ func (o tagOptions) At(i int) string {
 // v expected to be a struct.
 //
 // Tag are specified using 'cmd' followed by either 'flag' or 'arg':
-//    `cmd:"flag,id,content id, i,true,true"`
+//    `cmd:"flag,id,content id, i,true,true,true"`
 //    `cmd:"arg,id,content id,0"`
 // are read as:
-//    flag: name, usage, shorthand, persistent, required
+//    flag: name, usage, shorthand, persistent, required, hidden
 //    arg: name, usage, order
+// Attributes with default value on the right side of the expression can be omitted:
+//    `cmd:"flag,id,content id, i"`
+// A 'meta' tag can be added to convey annotations with the bound tag:
+//    `cmd:"flag,config,file name,c" meta:"file,non-empty"`
 func Bind(c *cobra.Command, v interface{}) error {
 	return BindCustom(c, nil, v)
 }
@@ -1044,4 +1078,39 @@ func SetArgs(c *cobra.Command, args []string) (interface{}, error) {
 
 	v, _ := GetCmdInput(c)
 	return v, nil
+}
+
+// GetFlagArgSet returns a map[string]string of flags and args that were set for
+// the given command. This function has to be called after SetArgs.
+func GetFlagArgSet(c *cobra.Command) map[string]string {
+	ret := make(map[string]string)
+
+	if cmdflags, err := GetCmdFlagSet(c); err == nil {
+		for name, fl := range cmdflags {
+			// for flags: cmdString returns ["--flag", "value"] except for bool
+			ss := fl.cmdString(true)
+			switch len(ss) {
+			case 0:
+				continue
+			case 1:
+				// should not happen since we ask for full flag
+				ndx := strings.Index(ss[0], "=")
+				if ndx > 0 {
+					ret[string(name)] = ss[0][ndx+1:]
+				}
+			default:
+				ret[string(name)] = ss[1]
+			}
+		}
+	}
+	if argflags, err := GetCmdArgSet(c); err == nil {
+		for _, fl := range argflags.Flags {
+			ss := fl.CmdString()
+			if len(ss) == 0 {
+				continue
+			}
+			ret[string(fl.Name)] = ss[0]
+		}
+	}
+	return ret
 }

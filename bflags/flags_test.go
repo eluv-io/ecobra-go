@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	"github.com/eluv-io/errors-go"
 )
 
 func scanStructFields(u interface{}) (string, []reflect.StructField) {
@@ -104,11 +105,42 @@ func assertFlag(t *testing.T, c *cobra.Command, name string) *pflag.Flag {
 }
 
 type TestPtrBoolIntString struct {
-	Is     *bool   `cmd:"flag"`
-	Int    *int    `cmd:"flag"`
+	Is     *bool   `cmd:"flag" meta:"ok"`
+	Int    *int    `cmd:"flag" meta:"one,two"`
 	Int64  *int64  `cmd:"flag"`
 	Str    *string `cmd:"flag"`
+	Arg    *string `cmd:"arg" meta:"ok"`
 	Ignore string
+}
+
+func TestAnnotations(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestPtrBoolIntString{}
+	err := Bind(c, sts)
+	require.NoError(t, err)
+
+	flags, err := GetCmdFlagSet(c)
+	require.NoError(t, err)
+	f, ok := flags[cmdFlag("Is")]
+	require.True(t, ok)
+	require.Equal(t, 1, len(f.Annotations))
+	require.Equal(t, "ok", f.Annotations[0])
+
+	f, ok = flags[cmdFlag("Int")]
+	require.True(t, ok)
+	require.Equal(t, 2, len(f.Annotations))
+	require.Equal(t, "one", f.Annotations[0])
+	require.Equal(t, "two", f.Annotations[1])
+
+	args, err := GetCmdArgSet(c)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(args.Flags))
+	f = args.Flags[0]
+	require.Equal(t, cmdFlag("Arg"), f.Name)
+	require.Equal(t, 1, len(f.Annotations))
+	require.Equal(t, "ok", f.Annotations[0])
 }
 
 // TestBindPtrBoolIntString test that binding to pointer values

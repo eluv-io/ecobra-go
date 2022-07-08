@@ -20,10 +20,23 @@
 		cmd.Flags().StringP("id", "i", "", "content id")
 	Note that flag names are case-sensitive
 
-	The default value is the value of the tagged field.
+	The default value is the value of the tagged field. In the example below the
+	field Ip of myInput is initialized with net.IPv4(127, 0, 0, 1) before being
+ 	bound. This makes the flag --ip having a default value of 127.0.0.1.
 
 	For `arg` tags, the order (starting at 0) must be specified for all or none
-	of the fields.
+	of the fields in the struct.
+
+	The library also supports specifying a 'meta' tag, followed by a comma separated
+	list of values that are attached as a slice of strings to the 'Annotations' field
+	of the resulting FlagBond:
+		`meta:"value1,value2"`
+
+	Even though not a frequent usage, the bound flags can be retrieved after binding:
+		var c *cobra.Command
+		_ = Bind(c, &MyStruct{})
+		flags, _ := GetCmdFlagSet(c)
+		args, _ := GetCmdArgSet(c)
 
 
 	Example
@@ -168,7 +181,7 @@
 
 	NOTES
 		* inner structs - even anonymous - can be used for bindings BUT the
-		  inner struct needs to be initialized otherwise an error is raise
+		  inner struct needs to be initialized otherwise an error is raised
 		  since no binding would occur for its fields.
 
 

@@ -5,10 +5,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/spf13/cobra"
 
 	"github.com/eluv-io/ecobra-go/bflags"
+	"github.com/eluv-io/errors-go"
 )
 
 type SamplePrinter interface {
@@ -355,8 +355,7 @@ func (s *cmdSampler) ValidateExamples() error {
 	}
 	for _, ex := range examples {
 		// construct the cobra commands
-		s.app.root = nil
-		root, err := s.app.Cobra()
+		root, err := s.app.NewCobra()
 		if err != nil {
 			return err
 		}
