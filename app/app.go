@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -8,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 
 	"github.com/eluv-io/ecobra-go/bflags"
+	"github.com/eluv-io/errors-go"
 )
 
 func SpecOf(cmd *cobra.Command) *spec {
@@ -37,10 +38,13 @@ type Ctor func() interface{}
 
 // Runfn is the type of function that a command shall execute at runtime. These
 // functions are expected to conform to the following prototype:
-//   func(ctx *CmdCtx, in interface{}) (interface{}, error)
+//
+//	func(ctx *CmdCtx, in interface{}) (interface{}, error)
+//
 // - At least one input parameter:
 //   - first of type *CmdCtx
 //   - optionally a second parameter that is the input of the command
+//
 // - 2 output parameters, the last one being an error
 type Runfn interface{}
 
@@ -85,9 +89,9 @@ func isRunFn(name string, fn interface{}) error {
 }
 
 // inputCtor returns the input of a command. If input is
-// - a function, it must be a constructor (func without parameter and a single
-//   return) the returned value of the function is returned as the input.
-// - otherwise input is returned unchanged
+//   - a function, it must be a constructor (func without parameter and a single
+//     return) the returned value of the function is returned as the input.
+//   - otherwise input is returned unchanged
 func inputCtor(input interface{}) (interface{}, error) {
 	e := errors.Template("input ctor", errors.K.Invalid)
 	fn := reflect.ValueOf(input)
@@ -162,11 +166,15 @@ func (s *spec) setFor(cmd *cobra.Command) {
 var _ flag.Value = (*spec)(nil)
 
 func (s *spec) String() string {
-	res, err := json.MarshalIndent(s, "", "  ")
+	buf := bytes.NewBuffer(make([]byte, 0))
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	err := enc.Encode(s)
 	if err != nil {
 		panic("Failed to marshal json: " + err.Error())
 	}
-	return string(res)
+	return string(buf.Bytes())
 }
 
 // not intended to be called
@@ -484,6 +492,11 @@ func CobraFn(fn CobraFunction) CobraFunc {
 	return CobraFunc{fn: fn}
 }
 
+func (c *CobraFunc) String() string {
+	ret, _ := c.MarshalText()
+	return string(ret)
+}
+
 // MarshalText implements custom marshaling using the string representation.
 func (c *CobraFunc) MarshalText() ([]byte, error) {
 	n := c.name
@@ -518,6 +531,11 @@ func RunFnWithName(name string) RunFunc {
 
 func RunFn(fn Runfn) RunFunc {
 	return RunFunc{fn: fn}
+}
+
+func (c *RunFunc) String() string {
+	ret, _ := c.MarshalText()
+	return string(ret)
 }
 
 // MarshalText implements custom marshaling using the string representation.
@@ -845,6 +863,94 @@ func (c *Cmd) ToCobra(parent *cobra.Command, f bflags.Flagger) (*cobra.Command, 
 		}
 	}
 	return cmd, nil
+}
+
+type JCmd struct {
+	app                        *App
+	Use                        string            `json:"use"`
+	Aliases                    []string          `json:"aliases,omitempty"`
+	SuggestFor                 []string          `json:"suggest_for,omitempty"`
+	Short                      string            `json:"short"`
+	Long                       mstring           `json:"long,omitempty"`
+	Category                   string            `json:"category,omitempty"`
+	Example                    mstring           `json:"example,omitempty"`
+	ValidArgs                  []string          `json:"valid_args,omitempty"`
+	Args                       string            `json:"args,omitempty"`
+	ArgsValidator              ValidatorCtor     `json:"-"` // additional validator
+	ArgAliases                 []string          `json:"arg_aliases,omitempty"`
+	BashCompletionFunction     string            `json:"bash_completion_function,omitempty"`
+	Deprecated                 string            `json:"deprecated,omitempty"`
+	Hidden                     bool              `json:"hidden,omitempty"`
+	Annotations                map[string]string `json:"annotations,omitempty"`
+	Version                    string            `json:"version,omitempty"`
+	PersistentPreRunE          string            `json:"persistent_pre_run_e,omitempty"`
+	PreRunE                    string            `json:"pre_run_e,omitempty"`
+	RunE                       string            `json:"run_e,omitempty"`
+	PostRunE                   string            `json:"post_run_e,omitempty"`
+	PersistentPostRunE         string            `json:"persistent_post_run_e,omitempty"`
+	SilenceErrors              bool              `json:"silence_errors,omitempty"`
+	SilenceUsage               bool              `json:"silence_usage,omitempty"`
+	DisableFlagParsing         bool              `json:"disable_flag_parsing,omitempty"`
+	DisableAutoGenTag          bool              `json:"disable_auto_gen_tag,omitempty"`
+	DisableFlagsInUseLine      bool              `json:"disable_flags_in_use_line,omitempty"`
+	DisableSuggestions         bool              `json:"disable_suggestions,omitempty"`
+	SuggestionsMinimumDistance int               `json:"suggestions_minimum_distance,omitempty"`
+	TraverseChildren           bool              `json:"traverse_children,omitempty"`
+	InputCtor                  string            `json:"input_ctor,omitempty"`   // name of input in app's map
+	Input                      CmdInput          `json:"input,omitempty"`        // json of input or input object
+	SubCommands                []*Cmd            `json:"sub_commands,omitempty"` // sub commands
+}
+
+func (c *Cmd) MarshalJSON() ([]byte, error) {
+	jc := JCmd{
+		app:                        c.app,
+		Use:                        c.Use,
+		Aliases:                    c.Aliases,
+		SuggestFor:                 c.SuggestFor,
+		Short:                      c.Short,
+		Long:                       c.Long,
+		Category:                   c.Category,
+		Example:                    c.Example,
+		ValidArgs:                  c.ValidArgs,
+		Args:                       c.Args,
+		ArgsValidator:              c.ArgsValidator,
+		ArgAliases:                 c.ArgAliases,
+		BashCompletionFunction:     c.BashCompletionFunction,
+		Deprecated:                 c.Deprecated,
+		Hidden:                     c.Hidden,
+		Annotations:                c.Annotations,
+		Version:                    c.Version,
+		PersistentPreRunE:          c.PersistentPreRunE.String(),
+		PreRunE:                    c.PreRunE.String(),
+		RunE:                       c.RunE.String(),
+		PostRunE:                   c.PostRunE.String(),
+		PersistentPostRunE:         c.PersistentPostRunE.String(),
+		SilenceErrors:              c.SilenceErrors,
+		SilenceUsage:               c.SilenceUsage,
+		DisableFlagParsing:         c.DisableFlagParsing,
+		DisableAutoGenTag:          c.DisableAutoGenTag,
+		DisableFlagsInUseLine:      c.DisableFlagsInUseLine,
+		DisableSuggestions:         c.DisableSuggestions,
+		SuggestionsMinimumDistance: c.SuggestionsMinimumDistance,
+		TraverseChildren:           c.TraverseChildren,
+		InputCtor:                  c.InputCtor,
+		Input:                      c.Input,
+		SubCommands:                c.SubCommands,
+	}
+	ti := reflect.TypeOf(jc.Input)
+	if ti != nil && ti.Kind() == reflect.Func {
+		jc.Input = runtime.FuncForPC(reflect.ValueOf(jc.Input).Pointer()).Name()
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0))
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	err := enc.Encode(&jc)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // Results book keeping
