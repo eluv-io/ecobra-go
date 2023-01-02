@@ -27,7 +27,7 @@ const (
 type FlagBond struct {
 	isArg       bool        // false for flags, true for args
 	Name        cmdFlag     // name of the flag
-	Shorthand   string      // one letter short-hand or the empty sting for none
+	Shorthand   string      // one letter shorthand or the empty string for none
 	Value       interface{} // the default value (use zero value for no default)
 	Usage       string      // usage string : must not be empty
 	Required    bool        // true if the flag is required
