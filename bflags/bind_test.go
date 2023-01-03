@@ -1,6 +1,7 @@
 package bflags
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -15,6 +16,11 @@ type testOpts struct {
 	done     bool
 }
 
+func (o *testOpts) run() error {
+	o.done = true
+	return nil
+}
+
 func TestBind(t *testing.T) {
 	in := &testOpts{}
 	cmd, err := BindRunE(
@@ -26,8 +32,7 @@ func TestBind(t *testing.T) {
 			Example: "test a b",
 		},
 		func(opts *testOpts) error {
-			opts.done = true
-			return nil
+			return opts.run()
 		},
 		nil)
 	require.NoError(t, err)
@@ -39,4 +44,78 @@ func TestBind(t *testing.T) {
 	require.True(t, in.NoCert)
 	require.True(t, in.done)
 	require.Equal(t, []string{"x", "y"}, in.Domains)
+}
+
+func TestBinder(t *testing.T) {
+	root := NewBinderC(
+		&cobra.Command{
+			Use:   "test ",
+			Short: "root command",
+		}).
+		AddCommand(
+			NewBinder(
+				&testOpts{},
+				&cobra.Command{
+					Use:     "a <domains>",
+					Args:    cobra.MinimumNArgs(1),
+					Example: "test a x",
+				},
+				func(opts *testOpts) error {
+					return opts.run()
+				},
+				nil),
+			NewBinder(
+				&testOpts{},
+				&cobra.Command{
+					Use:     "b <domains>",
+					Args:    cobra.MinimumNArgs(1),
+					Example: "test b y",
+				},
+				func(opts *testOpts) error {
+					return opts.run()
+				},
+				nil))
+	require.NoError(t, root.Error)
+	require.Equal(t, 2, len(root.Command.Commands()))
+}
+
+func TestBinderError(t *testing.T) {
+	root := NewBinderC(
+		&cobra.Command{
+			Use:   "test <domains>",
+			Short: "explanation short",
+		}).
+		AddCommand(
+			NewBinderC(
+				&cobra.Command{
+					Use:   "sub",
+					Short: "sub commands",
+				}).
+				AddCommand(
+					NewBinder(
+						nil,
+						&cobra.Command{
+							Use:     "a <domains>",
+							Short:   "explanation short",
+							Args:    cobra.MinimumNArgs(1),
+							Example: "test a b",
+						},
+						func(opts *testOpts) error {
+							return opts.run()
+						},
+						nil),
+					NewBinder(
+						nil,
+						&cobra.Command{
+							Use:     "b <domains>",
+							Short:   "explanation short",
+							Args:    cobra.MinimumNArgs(1),
+							Example: "test a b",
+						},
+						func(opts *testOpts) error {
+							return opts.run()
+						},
+						nil)))
+	require.Error(t, root.Error)
+	fmt.Println(root.Error)
 }

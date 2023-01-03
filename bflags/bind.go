@@ -241,10 +241,21 @@ func GetFlagArgSet(c *cobra.Command) map[string]string {
 
 // BindRunE binds the input parameter to the given command and sets the runE
 // parameter function as the function invoked by the RunE function of the cobra command.
-func BindRunE[T any](input T, cmd *cobra.Command, runE func(T) error, f Flagger) (*cobra.Command, error) {
-	e := errors.Template("Bind", errors.K.Invalid, "input", input)
+func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger) (*cobra.Command, error) {
+	e := errors.Template("BindRunE", errors.K.Invalid,
+		"input", input,
+		"command", cmd.Use)
 	if cmd == nil {
 		return nil, e("reason", "nil command  not allowed")
+	}
+	if input == nil && runE != nil {
+		return nil, e("reason", "nil input with non nil runE function")
+	}
+	if input == nil {
+		return cmd, nil
+	}
+	if runE == nil {
+		return nil, e("reason", "nil runE function")
 	}
 
 	if reflect.TypeOf(input).Kind() != reflect.Ptr ||
@@ -288,4 +299,71 @@ func BindRunE[T any](input T, cmd *cobra.Command, runE func(T) error, f Flagger)
 	ConfigureCommandHelp(cmd)
 
 	return cmd, nil
+}
+
+// Binder is a utility for building trees of commands with bindings.
+// Example:
+//
+//		 root := NewBinderC(
+//				&cobra.Command{
+//					Use:   "test",
+//					Short: "root command",
+//				}).
+//				AddCommand(
+//					NewBinder(
+//						&testOpts{},
+//						&cobra.Command{
+//							Use:     "a <domains>",
+//							Example: "test a x",
+//						},
+//						func(opts *testOpts) error {
+//							return opts.run()
+//						},
+//						nil),
+//					NewBinder(
+//						&testOpts{},
+//						&cobra.Command{
+//							Use:     "b <domains>",
+//							Example: "test b y",
+//						},
+//						func(opts *testOpts) error {
+//							return opts.run()
+//						},
+//						nil))
+//		if root.Error != nil {
+//			panic(root.Error)
+//		}
+//	 ... use root.Command
+type Binder struct {
+	Error   error
+	Command *cobra.Command
+}
+
+// NewBinderC constructs a new Binder with just a Command. This is useful for
+// commands that are only parents of other commands, like the root command.
+func NewBinderC(c *cobra.Command) *Binder {
+	return NewBinder[any](nil, c, nil, nil)
+}
+
+// NewBinder returns a Binder initialized by running BindRunE with the given parameters
+func NewBinder[T any](in *T, c *cobra.Command, runE func(*T) error, f Flagger) *Binder {
+	cmd, err := BindRunE(in, c, runE, f)
+	return &Binder{
+		Error:   errors.ClearStacktrace(err),
+		Command: cmd,
+	}
+}
+
+// AddCommand adds the commands of the given Binder instances to the command of
+// this Binder or append their error to the Error of this Binder if they have
+// errors.
+func (b *Binder) AddCommand(bound ...*Binder) *Binder {
+	for _, bn := range bound {
+		if bn.Error != nil {
+			b.Error = errors.Append(b.Error, bn.Error)
+		} else if b.Command != nil {
+			b.Command.AddCommand(bn.Command)
+		}
+	}
+	return b
 }
