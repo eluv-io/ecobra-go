@@ -20,10 +20,10 @@ func TestBind(t *testing.T) {
 	cmd, err := BindRunE(
 		in,
 		&cobra.Command{
-			Use:     "test",
+			Use:     "test <domains>",
 			Short:   "explanation short",
 			Args:    cobra.MinimumNArgs(1),
-			Example: "bla",
+			Example: "test a b",
 		},
 		func(opts *testOpts) error {
 			opts.done = true

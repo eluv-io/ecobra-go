@@ -289,23 +289,7 @@ func (a *App) configureHelp() {
 	} else {
 		AddTemplateFunc("categories", func() string { return "" })
 	}
-	AddTemplateFunc("arguments",
-		func(cmd *cobra.Command) string {
-			argSet, err := bflags.GetCmdArgSet(cmd)
-			if err != nil {
-				return err.Error()
-			}
-			return argSet.ArgUsages()
-		})
-	AddTemplateFunc("hasArgs",
-		func(cmd *cobra.Command) bool {
-			argSet, err := bflags.GetCmdArgSet(cmd)
-			if err != nil {
-				return false
-			}
-			return len(argSet.Flags) > 0
-		})
-	AddTemplateFunc("fullUsageString", fullUsageString)
+	bflags.ConfigureHelpFuncs()
 
 	// configure help
 	configureHelp(a.root)

@@ -284,5 +284,8 @@ func BindRunE[T any](input T, cmd *cobra.Command, runE func(T) error, f Flagger)
 	if err != nil {
 		return nil, e(err)
 	}
+	ConfigureHelpFuncs()
+	ConfigureCommandHelp(cmd)
+
 	return cmd, nil
 }
