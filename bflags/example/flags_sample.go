@@ -6,10 +6,10 @@ import (
 	"net"
 	"os"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/spf13/cobra"
 
 	"github.com/eluv-io/ecobra-go/bflags"
+	"github.com/eluv-io/errors-go"
 )
 
 type myInput struct {
@@ -59,7 +59,7 @@ func runSample(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("sample - input %s\n", string(string(bb)))
+	fmt.Printf("sample - input %s\n", string(bb))
 	return nil
 }
 

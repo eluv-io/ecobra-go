@@ -5,6 +5,7 @@ const (
 	CtxResult        = "result"
 	CtxAddResultFn   = "add-result-fn"
 	CtxPrintResultFn = "print-result-fn"
+	CtxGetResultFn   = "get-result-fn"
 	CmdValidate      = "$cmd-validate"
 )
 

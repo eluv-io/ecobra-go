@@ -3,879 +3,15 @@ package bflags
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"reflect"
-	"sort"
-	"strconv"
+	"runtime"
 	"strings"
-	"sync"
-	"time"
-	"unicode"
 
-	"github.com/eluv-io/errors-go"
-	elog "github.com/eluv-io/log-go"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+
+	"github.com/eluv-io/errors-go"
 )
-
-const (
-	bflagsLogPath = "/cli/bflags"
-)
-
-var log = elog.Get(bflagsLogPath)
-
-type bindOpts struct {
-}
-
-// An flagsBinder binds flags and args into a *cobra.Command.
-type flagsBinder struct {
-	cmd      *cobra.Command
-	custom   Flagger
-	cmdFlags CmdFlags
-	argFlags []*FlagBond
-}
-
-func (e *flagsBinder) Reset(c *cobra.Command, custom Flagger) {
-	e.cmd = c
-	e.custom = custom
-	e.cmdFlags = make(CmdFlags)
-	e.argFlags = make([]*FlagBond, 0)
-}
-
-type bindError struct{ error }
-
-var bindStatePool sync.Pool
-
-func newFlagsBinder(c *cobra.Command, custom Flagger) *flagsBinder {
-	var e *flagsBinder
-	if v := bindStatePool.Get(); v != nil {
-		e = v.(*flagsBinder)
-	} else {
-		e = new(flagsBinder)
-	}
-	e.Reset(c, custom)
-	return e
-}
-
-func (e *flagsBinder) bind(v interface{}, opts bindOpts) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			if je, ok := r.(bindError); ok {
-				err = je.error
-			} else {
-				panic(r)
-			}
-		}
-	}()
-	ex := errors.Template("bind", "v", fmt.Sprintf("%#v", v))
-	val := reflect.ValueOf(v)
-	if val.Kind() != reflect.Interface && val.Kind() != reflect.Ptr {
-		return ex("reason", "cannot call value.Elem",
-			"kind", val.Kind().String())
-	}
-	e.reflectValue(val.Elem(), opts)
-	err = e.cmdFlags.ConfigureCmd(e.cmd, e.custom)
-	if err != nil {
-		return err
-	}
-	// configure args and deal with ordering
-	argf := make([]*FlagBond, len(e.argFlags))
-	if len(e.argFlags) > 0 {
-		hasOrder := e.argFlags[0].ArgOrder >= 0
-		for i := 1; i < len(e.argFlags); i++ {
-			if (e.argFlags[i].ArgOrder >= 0) != hasOrder {
-				return ex("reason", "args order must be either fully specified or not at all",
-					"arg_flag", e.argFlags[i].Name,
-					"order", e.argFlags[i].ArgOrder)
-			}
-		}
-	}
-	for i, fb := range e.argFlags {
-		fb.Hidden = true
-		_, err = e.cmdFlags.configureFlag(e.cmd, e.custom, fb)
-		if err != nil {
-			return err
-		}
-		if fb.ArgOrder >= 0 {
-			if fb.ArgOrder >= len(e.argFlags) {
-				return ex("reason", "invalid order specified", "found order", fb.ArgOrder)
-			}
-			if argf[fb.ArgOrder] != nil {
-				return ex("reason", "duplicate order specified", "found order", fb.ArgOrder)
-			}
-			argf[fb.ArgOrder] = fb
-		} else {
-			argf[i] = fb
-		}
-	}
-	setCmdArgSet(e.cmd, argf)
-	setCmdInput(e.cmd, v)
-
-	return nil
-}
-
-// error aborts the binding by panicking with err wrapped in bindError.
-func (e *flagsBinder) error(err *errors.Error) {
-	panic(bindError{error: err})
-}
-
-func (e *flagsBinder) reflectValue(v reflect.Value, opts bindOpts) {
-	e.valueBinder(v)(e, v, nil, opts)
-}
-
-func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
-	ex := errors.Template("setFlagBound",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	short := ""
-	required := false
-	persistent := false
-	hidden := false
-	order := -1
-	isArg := false
-	if spec.kind() == flagTag {
-		short = spec.(*flagSpec).shorthand
-		persistent = spec.(*flagSpec).persistent
-		required = spec.(*flagSpec).required
-		hidden = spec.(*flagSpec).hidden
-	} else {
-		isArg = true
-		order = spec.(*argSpec).order
-	}
-
-	name := cmdFlag(spec.getName())
-	fb := &FlagBond{
-		isArg:      isArg,
-		Name:       name,
-		Shorthand:  short,
-		Value:      ptr,
-		Usage:      spec.getDescription(),
-		Required:   required,
-		Persistent: persistent,
-		Hidden:     hidden,
-		ArgOrder:   order,
-	}
-
-	if spec.kind() == flagTag {
-		if _, ok := e.cmdFlags[name]; ok {
-			e.error(ex("reason", "duplicate flag", "name", name))
-		}
-		e.cmdFlags[name] = fb
-	} else {
-		e.argFlags = append(e.argFlags, fb)
-	}
-}
-
-func (e *flagsBinder) valueBinder(v reflect.Value) binderFunc {
-	if !v.IsValid() {
-		return invalidValueBinder
-	}
-	return typeBinder(e, v.Type())
-}
-
-// ----- binders -----
-
-type binderFunc func(e *flagsBinder, v reflect.Value, spec cmdSpec, opts bindOpts)
-
-func invalidValueBinder(e *flagsBinder, v reflect.Value, _ cmdSpec, _ bindOpts) {
-	e.error(errors.E("invalid value", "value", v))
-}
-
-func unsupportedTypeBinder(e *flagsBinder, v reflect.Value, _ cmdSpec, _ bindOpts) {
-	e.error(errors.E("unsupported type", "type", v.Type()))
-}
-
-func interfaceBinder(e *flagsBinder, v reflect.Value, _ cmdSpec, opts bindOpts) {
-	if v.IsNil() {
-		e.error(errors.E("unsupported type", "type", v.Type(), "reason", "nil interface"))
-		return
-	}
-	e.reflectValue(v.Elem(), opts)
-}
-
-func newMapBinder(_ reflect.Type) binderFunc {
-	return unsupportedTypeBinder
-}
-
-// sliceBinder just wraps an arrayBinder
-type sliceBinder struct {
-	arrayEnc binderFunc
-}
-
-func (se *sliceBinder) bind(e *flagsBinder, v reflect.Value, spec cmdSpec, opts bindOpts) {
-	se.arrayEnc(e, v, spec, opts)
-}
-
-func newSliceBinder(e *flagsBinder, t reflect.Type) binderFunc {
-	enc := &sliceBinder{newArrayBinder(e, t)}
-	return enc.bind
-}
-
-type arrayBinder struct {
-	elemTyp reflect.Type
-}
-
-func (ae *arrayBinder) bind(e *flagsBinder, v reflect.Value, spec cmdSpec, opts bindOpts) {
-	ex := errors.Template("arrayBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	ok := v.Kind() == reflect.Slice || v.Kind() == reflect.Array
-	if !ok {
-		e.error(ex("wrong type, expected slice or array, got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(iface, spec)
-}
-
-func newArrayBinder(e *flagsBinder, t reflect.Type) binderFunc {
-	_ = e
-	enc := &arrayBinder{t.Elem()}
-	return enc.bind
-}
-
-type ptrBinder struct {
-	elemEnc binderFunc
-}
-
-func (pe ptrBinder) bind(e *flagsBinder, v reflect.Value, spec cmdSpec, opts bindOpts) {
-	ex := errors.Template("ptrBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-	if v.IsNil() {
-		iface := v.Addr().Interface()
-		switch ptr := iface.(type) {
-		case **bool, **string, **int, **int64:
-			// allow binding to nil of these
-			e.setFlagBound(ptr, spec)
-		default:
-			// others are not supported
-			e.error(ex("reason", "can't bind to nil pointer"))
-		}
-		return
-	}
-	pe.elemEnc(e, v.Elem(), spec, opts)
-}
-
-func newPtrBinder(e *flagsBinder, t reflect.Type) binderFunc {
-	enc := ptrBinder{typeBinder(e, t.Elem())}
-	return enc.bind
-}
-
-func boolBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("boolBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	ptr, ok := iface.(*bool)
-	if !ok {
-		e.error(ex("wrong type, expected *bool, got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(ptr, spec)
-}
-
-func stringBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("stringBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	ptr, ok := iface.(*string)
-	if !ok {
-		e.error(ex("wrong type, expected *string, got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(ptr, spec)
-}
-
-func uintBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("uintBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-
-	var ok = false
-	k := v.Kind()
-	switch k {
-	case reflect.Uint:
-		fallthrough
-	case reflect.Uint8:
-		fallthrough
-	case reflect.Uint16:
-		fallthrough
-	case reflect.Uint32:
-		fallthrough
-	case reflect.Uint64:
-		ok = true
-	case reflect.Uintptr:
-		// needed ?
-	}
-
-	if !ok {
-		e.error(ex("wrong type, expected *uint[x], got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(iface, spec)
-}
-
-func intBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("intBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-
-	var ok = false
-	k := v.Kind()
-	switch k {
-	case reflect.Int:
-		fallthrough
-	case reflect.Int8:
-		fallthrough
-	case reflect.Int16:
-		fallthrough
-	case reflect.Int32:
-		fallthrough
-	case reflect.Int64:
-		ok = true
-	}
-
-	if !ok {
-		e.error(ex("wrong type, expected *int[x], got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(iface, spec)
-}
-
-type floatBinder int // number of bits
-
-func (bits floatBinder) bind(e *flagsBinder, v reflect.Value, spec cmdSpec, opts bindOpts) {
-	f := v.Float()
-	_ = f
-	ex := errors.Template("floatBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-
-	var ok = false
-	k := v.Kind()
-	switch k {
-	case reflect.Float32:
-		fallthrough
-	case reflect.Float64:
-		ok = true
-	}
-
-	if !ok {
-		e.error(ex("wrong type, expected *float[x], got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(iface, spec)
-}
-
-var (
-	float32Binder = (floatBinder(32)).bind
-	float64Binder = (floatBinder(64)).bind
-)
-
-func ipBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("ipBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	ptr, ok := iface.(*net.IP)
-	if !ok {
-		e.error(ex("wrong type, expected *net.IP, got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(ptr, spec)
-}
-
-func durationBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("durationBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	ptr, ok := iface.(*time.Duration)
-	if !ok {
-		e.error(ex("wrong type, expected *time.Duration, got", reflect.TypeOf(iface)))
-	}
-	e.setFlagBound(ptr, spec)
-}
-
-func customBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	iface := v.Addr().Interface()
-	e.setFlagBound(iface, spec)
-}
-
-func flagValueBinder(e *flagsBinder, v reflect.Value, spec cmdSpec, _ bindOpts) {
-	ex := errors.Template("flagValueBinder",
-		"tag_type", spec.kind(),
-		"name", spec.getName())
-
-	iface := v.Addr().Interface()
-	_, ok := reflect.ValueOf(iface).Elem().Interface().(flag.Value)
-	if !ok {
-		e.error(ex("wrong type, expected flag.Value, got", reflect.TypeOf(iface)))
-	}
-	if v.Kind() == reflect.Struct {
-		//ignored for now: need to use a pointer on it
-	}
-	e.setFlagBound(iface, spec)
-}
-
-type structBinder struct {
-	fields    []field
-	fieldEncs []binderFunc
-}
-
-func (se *structBinder) bind(e *flagsBinder, v reflect.Value, _ cmdSpec, opts bindOpts) {
-	for i, f := range se.fields {
-		fv := fieldByIndex(v, f.index)
-		//if !fv.IsValid() || f.omitEmpty && isEmptyValue(fv) {
-		if !fv.IsValid() {
-			// NOTE: this where binding fields of inner structs WON'T work if
-			//       the inner struct is not initialized (binding won't happen)
-			//continue: raise an error rather than ignore
-			e.error(errors.E("bind", errors.K.Invalid,
-				"reason", "invalid value for binding",
-				"possible cause", "inner struct not initialized",
-				"name", f.name,
-				"type", f.typ.String()))
-		}
-		se.fieldEncs[i](e, fv, f.spec, opts)
-	}
-}
-
-func newStructBinder(e *flagsBinder, t reflect.Type) binderFunc {
-	fields := typeFields(t)
-	se := &structBinder{
-		fields:    fields,
-		fieldEncs: make([]binderFunc, len(fields)),
-	}
-	for i, f := range fields {
-		se.fieldEncs[i] = typeBinder(e, typeByIndex(t, f.index))
-	}
-	return se.bind
-}
-
-func typeBinder(e *flagsBinder, t reflect.Type) binderFunc {
-	// first take care of custom types
-	if e.custom != nil && e.custom.Bind(t) {
-		return customBinder
-	}
-	// .. or known types
-	switch t {
-	case reflect.TypeOf(net.IP{}):
-		return ipBinder
-	case reflect.TypeOf(time.Duration(0)):
-		return durationBinder
-	}
-	//if t.Implements(reflect.TypeOf((*flag.Value)(nil)).Elem()) {
-	//	return flagValueBinder
-	//}
-
-	switch t.Kind() {
-	case reflect.String:
-		return stringBinder
-	case reflect.Bool:
-		return boolBinder
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return intBinder
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return uintBinder
-	case reflect.Float32:
-		return float32Binder
-	case reflect.Float64:
-		return float64Binder
-	case reflect.Interface:
-		return interfaceBinder
-	case reflect.Struct:
-		return newStructBinder(e, t)
-	case reflect.Map:
-		return newMapBinder(t)
-	case reflect.Slice:
-		return newSliceBinder(e, t)
-	case reflect.Array:
-		return newArrayBinder(e, t)
-	case reflect.Ptr:
-		if t.Implements(reflect.TypeOf((*flag.Value)(nil)).Elem()) {
-			return flagValueBinder
-		}
-		return newPtrBinder(e, t)
-	default:
-		return unsupportedTypeBinder
-	}
-
-}
-
-// -----
-
-func fieldByIndex(v reflect.Value, index []int) reflect.Value {
-	for _, i := range index {
-		if v.Kind() == reflect.Ptr {
-			if v.IsNil() {
-				return reflect.Value{}
-			}
-			v = v.Elem()
-		}
-		v = v.Field(i)
-	}
-	return v
-}
-
-func typeByIndex(t reflect.Type, index []int) reflect.Type {
-	for _, i := range index {
-		if t.Kind() == reflect.Ptr {
-			t = t.Elem()
-		}
-		t = t.Field(i).Type
-	}
-	return t
-}
-
-/* tag spec
-
-cmd:"arg,id,content id,0"
-cmd:"flag,id,content id, i,true,true"
-
-*/
-const (
-	argTag  = "arg"
-	flagTag = "flag"
-)
-
-type cmdSpec interface {
-	kind() string
-	getName() string
-	setName(s string)
-	getDescription() string
-}
-
-// cmd:"arg,[name, description, [order]]"
-type argSpec struct {
-	name        string // name of the flag or arg parameter
-	description string // description
-	order       int    // optional order on command line
-}
-
-func (a *argSpec) kind() string {
-	return argTag
-}
-
-func (a *argSpec) getName() string {
-	return a.name
-}
-func (a *argSpec) setName(s string) {
-	a.name = s
-}
-func (a *argSpec) getDescription() string {
-	return a.description
-}
-
-// cmd:"flag,name[, description, short hand, persistent=false, required=false]"
-type flagSpec struct {
-	name        string // name of the flag or arg parameter
-	description string // description: used for usage
-	shorthand   string // one letter short hand or the empty sting for none
-	persistent  bool   // true: the flag is available to the command as well as every command under the command
-	required    bool   // true if the flag is required
-	hidden      bool   // true if the flag is hidden
-}
-
-func (a *flagSpec) kind() string {
-	return flagTag
-}
-
-func (a *flagSpec) getName() string {
-	return a.name
-}
-func (a *flagSpec) setName(s string) {
-	a.name = s
-}
-func (a *flagSpec) getDescription() string {
-	return a.description
-}
-
-// A field represents a single field found in a struct.
-type field struct {
-	name  string
-	index []int
-	typ   reflect.Type
-	spec  cmdSpec
-}
-
-// byIndex sorts field by index sequence.
-type byIndex []field
-
-func (x byIndex) Len() int { return len(x) }
-
-func (x byIndex) Swap(i, j int) { x[i], x[j] = x[j], x[i] }
-
-func (x byIndex) Less(i, j int) bool {
-	for k, xik := range x[i].index {
-		if k >= len(x[j].index) {
-			return false
-		}
-		if xik != x[j].index[k] {
-			return xik < x[j].index[k]
-		}
-	}
-	return len(x[i].index) < len(x[j].index)
-}
-
-// typeFields returns a list of fields that should be recognized for the given type.
-// The algorithm is breadth-first search over the set of structs to include - the top struct
-// and then any reachable anonymous structs.
-func typeFields(t reflect.Type) []field {
-	// Anonymous fields to explore at the current level and the next.
-	current := []field{}
-	next := []field{{typ: t}}
-
-	// Count of queued names for current level and the next.
-	count := map[reflect.Type]int{}
-	nextCount := map[reflect.Type]int{}
-
-	// Types already visited at an earlier level.
-	visited := map[reflect.Type]bool{}
-
-	// Fields found.
-	var fields []field
-
-	for len(next) > 0 {
-		current, next = next, current[:0]
-		count, nextCount = nextCount, map[reflect.Type]int{}
-
-		for _, f := range current {
-			if visited[f.typ] {
-				continue
-			}
-			visited[f.typ] = true
-
-			// Scan f.typ for fields to include.
-			for i := 0; i < f.typ.NumField(); i++ {
-				sf := f.typ.Field(i)
-				isUnexported := sf.PkgPath != ""
-				if sf.Anonymous {
-					t := sf.Type
-					if t.Kind() == reflect.Ptr {
-						t = t.Elem()
-					}
-					if isUnexported && t.Kind() != reflect.Struct {
-						// Ignore embedded fields of unexported non-struct types.
-						continue
-					}
-					// Do not ignore embedded fields of unexported struct types
-					// since they may have exported fields.
-				} else if isUnexported {
-					// Ignore unexported non-embedded fields.
-					continue
-				}
-				spec := parseFieldTag(sf)
-				if spec == nil && !sf.Anonymous {
-					// accept non anonymous inner struct
-					toCont := true
-					t := sf.Type
-					if t.Kind() == reflect.Ptr {
-						t = t.Elem()
-						if t.Kind() == reflect.Struct {
-							toCont = false
-						}
-					}
-					if toCont {
-						continue
-					}
-				}
-
-				index := make([]int, len(f.index)+1)
-				copy(index, f.index)
-				index[len(f.index)] = i
-
-				ft := sf.Type
-				if ft.Name() == "" && ft.Kind() == reflect.Ptr {
-					// Follow pointer.
-					ft = ft.Elem()
-				}
-
-				// Record found field and index sequence.
-				if spec != nil && (spec.getName() != "" || !sf.Anonymous || ft.Kind() != reflect.Struct) {
-					if spec.getName() == "" {
-						spec.setName(sf.Name)
-					}
-					fields = append(fields, field{
-						name:  spec.getName(),
-						index: index,
-						typ:   ft,
-						spec:  spec,
-					})
-					if count[f.typ] > 1 {
-						// If there were multiple instances, add a second,
-						// so that the annihilation code will see a duplicate.
-						// It only cares about the distinction between 1 or 2,
-						// so don't bother generating any more copies.
-						fields = append(fields, fields[len(fields)-1])
-					}
-					continue
-				}
-
-				// Record new anonymous struct to explore in next round.
-				nextCount[ft]++
-				if nextCount[ft] == 1 {
-					next = append(next, field{name: ft.Name(), index: index, typ: ft})
-				}
-			}
-		}
-	}
-
-	sort.Slice(fields, func(i, j int) bool {
-		x := fields
-		// sort field by name, breaking ties with depth, then
-		// breaking ties with "name came from cmd tag", then
-		// breaking ties with index sequence.
-		if x[i].name != x[j].name {
-			return x[i].name < x[j].name
-		}
-		if len(x[i].index) != len(x[j].index) {
-			return len(x[i].index) < len(x[j].index)
-		}
-		return byIndex(x).Less(i, j)
-	})
-
-	// Delete all fields that are hidden by the Go rules for embedded fields,
-	// except that fields with accepted tags are promoted.
-
-	// The fields are sorted in primary order of name, secondary order
-	// of field index length. Loop over names; for each name, delete
-	// hidden fields by choosing the one dominant field that survives.
-	out := fields[:0]
-	for advance, i := 0, 0; i < len(fields); i += advance {
-		// One iteration per name.
-		// Find the sequence of fields with the name of this first field.
-		fi := fields[i]
-		name := fi.name
-		for advance = 1; i+advance < len(fields); advance++ {
-			fj := fields[i+advance]
-			if fj.name != name {
-				break
-			}
-		}
-		if advance == 1 { // Only one field with this name
-			out = append(out, fi)
-			continue
-		}
-		/* ignore multiple fields with same name
-		dominant, ok := dominantField(fields[i : i+advance])
-		if ok {
-			out = append(out, dominant)
-		}
-		*/
-	}
-
-	fields = out
-	sort.Sort(byIndex(fields))
-
-	return fields
-}
-
-// ----- TAGS
-func isValidTag(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		switch {
-		case strings.ContainsRune("!#$%&()*+-./:<=>?@[]^_{|}~ ", c):
-			// Backslash and quote chars are reserved, but
-			// otherwise any punctuation chars are allowed
-			// in a tag name.
-		default:
-			if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func parseFieldTag(sf reflect.StructField) cmdSpec {
-	tag := sf.Tag.Get("cmd")
-	if tag == "-" || tag == "" {
-		return nil
-	}
-	kind, opts := parseTag(tag)
-	if !isValidTag(kind) {
-		kind = ""
-	}
-	name := opts.At(0)
-	description := opts.At(1)
-
-	if name == "" {
-		name = sf.Name
-	}
-
-	switch kind {
-	case "":
-		fallthrough //default to 'arg'
-	case argTag:
-		order, err := strconv.Atoi(opts.At(2))
-		if err != nil {
-			order = -1
-		}
-		return &argSpec{
-			name:        name,
-			description: description,
-			order:       order,
-		}
-	case flagTag:
-		persistent, _ := strconv.ParseBool(opts.At(3))
-		required, _ := strconv.ParseBool(opts.At(4))
-		hidden, _ := strconv.ParseBool(opts.At(5))
-		return &flagSpec{
-			name:        name,
-			description: description,
-			shorthand:   opts.At(2),
-			persistent:  persistent,
-			required:    required,
-			hidden:      hidden,
-		}
-	default:
-		return nil
-	}
-}
-
-// tagOptions is the string following a comma in a struct field's "cmd" tag
-// or the empty array.
-type tagOptions []string
-
-// parseTag splits a struct field's cmd tag into its type and comma-separated
-// options.
-func parseTag(tag string) (string, tagOptions) {
-	if idx := strings.Index(tag, ","); idx != -1 {
-		return tag[:idx], strings.Split(tag[idx+1:], ",")
-	}
-	return tag, []string{}
-}
-
-// Contains reports whether a given option was set
-func (o tagOptions) Contains(optionName string) bool {
-	if len(o) == 0 {
-		return false
-	}
-	for _, s := range []string(o) {
-		if s == optionName {
-			return true
-		}
-	}
-	return false
-}
-
-func (o tagOptions) At(i int) string {
-	if i < 0 || i >= len(o) {
-		return ""
-	}
-	return o[i]
-}
 
 // Bind binds the flags retrieved in tags of the given struct v as flags
 // or args of the given command.
@@ -884,15 +20,27 @@ func (o tagOptions) At(i int) string {
 // v expected to be a struct.
 //
 // Tag are specified using 'cmd' followed by either 'flag' or 'arg':
-//    `cmd:"flag,id,content id, i,true,true"`
-//    `cmd:"arg,id,content id,0"`
+//
+//	`cmd:"flag,id,content id, i,true,true,true"`
+//	`cmd:"arg,id,content id,0"`
+//
 // are read as:
-//    flag: name, usage, shorthand, persistent, required
-//    arg: name, usage, order
+//
+//	flag: name, usage, shorthand, persistent, required, hidden
+//	arg: name, usage, order
+//
+// Attributes with default value on the right side of the expression can be omitted:
+//
+//	`cmd:"flag,id,content id, i"`
+//
+// A 'meta' tag can be added to convey annotations with the bound tag:
+//
+//	`cmd:"flag,config,file name,c" meta:"file,non-empty"`
 func Bind(c *cobra.Command, v interface{}) error {
 	return BindCustom(c, nil, v)
 }
 
+// BindCustom is like Bind and allows a custom Flagger
 func BindCustom(c *cobra.Command, f Flagger, v interface{}) error {
 	if v == nil {
 		setCmdInput(c, nil)
@@ -930,40 +78,14 @@ func isSliceValue(f *flag.Flag) bool {
 	return strings.HasSuffix(f.Value.Type(), "Slice")
 }
 
-// SetupCmdArgs configures and returns the input struct bound to the provided
-// command with the given arguments.
-// * If the typ parameter is not nil the type of the input is verified
-// * if the input has a function 'Validate() error', the function is called
-// The input must have previously been bound to the command like so:
-// 	  input := &MyStruct{}
-//	  err := bflags.BindCustom(cmd, elvflags.Flags, input)
+// SetArgs sets the args to the 'arg' fields of the value previously bound as the
+// input of the command. The input must have previously been bound to the command
+// like so:
+//
+//	input := &MyStruct{}
+//	err := bflags.BindCustom(cmd, elvflags.Flags, input)
+//
 // The input is returned if no error occurred.
-func SetupCmdArgs(cmd *cobra.Command, args []string, typ reflect.Type) (interface{}, error) {
-	e := errors.Template("setupCmd", errors.K.Invalid)
-
-	m, err := SetArgs(cmd, args)
-	if err != nil {
-		return nil, e(err)
-	}
-	if typ != nil && typ != reflect.TypeOf(m) {
-		return nil, e("reason", "wrong input", "input", m)
-	}
-	type validatable interface {
-		Validate() error
-	}
-	if val, ok := m.(validatable); ok {
-		err = val.Validate()
-		if err != nil {
-			return nil, e(err)
-		}
-	}
-	// no usage from now on
-	cmd.SilenceUsage = true
-	cmd.Root().SilenceUsage = true
-
-	return m, nil
-}
-
 func SetArgs(c *cobra.Command, args []string) (interface{}, error) {
 	ex := errors.Template("setArgs")
 	if log.IsDebug() {
@@ -1044,4 +166,227 @@ func SetArgs(c *cobra.Command, args []string) (interface{}, error) {
 
 	v, _ := GetCmdInput(c)
 	return v, nil
+}
+
+// SetupCmdArgs configures and returns the input struct bound to the provided
+// command with the given arguments.
+// * If the typ parameter is not nil the type of the input is verified
+// * if the input has a function 'Validate() error', the function is called
+// The input must have previously been bound to the command like so:
+//
+//	input := &MyStruct{}
+//	err := bflags.BindCustom(cmd, elvflags.Flags, input)
+//
+// The input is returned if no error occurred.
+func SetupCmdArgs(cmd *cobra.Command, args []string, typ reflect.Type) (interface{}, error) {
+	e := errors.Template("setupCmd", errors.K.Invalid)
+
+	m, err := SetArgs(cmd, args)
+	if err != nil {
+		return nil, e(err)
+	}
+	if typ != nil && typ != reflect.TypeOf(m) {
+		return nil, e("reason", "wrong input", "input", m)
+	}
+	type validatable interface {
+		Validate() error
+	}
+	if val, ok := m.(validatable); ok {
+		err = val.Validate()
+		if err != nil {
+			return nil, e(err)
+		}
+	}
+	// no usage from now on
+	cmd.SilenceUsage = true
+	cmd.Root().SilenceUsage = true
+
+	return m, nil
+}
+
+// GetFlagArgSet returns a map[string]string of flags and args that were set for
+// the given command. This function has to be called after SetArgs.
+func GetFlagArgSet(c *cobra.Command) map[string]string {
+	ret := make(map[string]string)
+
+	if cmdflags, err := GetCmdFlagSet(c); err == nil {
+		for name, fl := range cmdflags {
+			// for flags: cmdString returns ["--flag", "value"] except for bool
+			ss := fl.cmdString(true)
+			switch len(ss) {
+			case 0:
+				continue
+			case 1:
+				// should not happen since we ask for full flag
+				ndx := strings.Index(ss[0], "=")
+				if ndx > 0 {
+					ret[string(name)] = ss[0][ndx+1:]
+				}
+			default:
+				ret[string(name)] = ss[1]
+			}
+		}
+	}
+	if argflags, err := GetCmdArgSet(c); err == nil {
+		for _, fl := range argflags.Flags {
+			ss := fl.CmdString()
+			if len(ss) == 0 {
+				continue
+			}
+			ret[string(fl.Name)] = ss[0]
+		}
+	}
+	return ret
+}
+
+// BindRunE binds the input parameter to the given command and sets the runE
+// parameter function as the function invoked by the RunE function of the cobra
+// command.
+// _Example_
+//
+//	type testOpts struct {
+//		Password string   `cmd:"flag,password,password for the user's key,x"`
+//		NoCert   bool     `cmd:"flag,no-cert,don't add certificate to the ssh-agent"`
+//		Domains  []string `cmd:"arg,domains,name of the ssh domains,0"`
+//		done     bool
+//	}
+//
+//	cmd, err := BindRunE(
+//		&testOpts{},
+//		&cobra.Command{
+//			Use:     "test <domains>",
+//			Short:   "explanation short",
+//			Args:    cobra.MinimumNArgs(1),
+//			Example: "test a b",
+//		},
+//		func(opts *testOpts) error {
+//			return opts.run()
+//		},
+//		nil)
+//	if err != nil {
+//		panic(err)
+//	}
+//	... use cmd
+func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger) (*cobra.Command, error) {
+	e := errors.Template("BindRunE", errors.K.Invalid,
+		"input", input,
+		"command", cmd.Use)
+	if cmd == nil {
+		return nil, e("reason", "nil command  not allowed")
+	}
+	if input == nil && runE != nil {
+		return nil, e("reason", "nil input with non nil runE function")
+	}
+	if input == nil {
+		return cmd, nil
+	}
+	if runE == nil {
+		return nil, e("reason", "nil runE function")
+	}
+
+	if reflect.TypeOf(input).Kind() != reflect.Ptr ||
+		reflect.ValueOf(input).Kind() != reflect.Ptr ||
+		reflect.ValueOf(input).Elem().Kind() != reflect.Struct {
+
+		return nil, e(
+			"reason", "only structs are supported",
+			"input_value_kind", reflect.ValueOf(input).Kind(),
+			"input_value_elem_kind", reflect.ValueOf(input).Elem().Kind())
+	}
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		funcName := runtime.FuncForPC(reflect.ValueOf(runE).Pointer()).Name()
+		e := errors.Template(funcName, errors.K.Invalid)
+
+		in, err := SetupCmdArgs(cmd, args, reflect.TypeOf(input))
+		if err != nil {
+			return e(err)
+		}
+
+		if in != input {
+			return e(errors.K.Internal,
+				"reason", "wrong value retrieved from SetupCmdArgs",
+				"in", fmt.Sprintf("%p", in),
+				"input", fmt.Sprintf("%p", input))
+		}
+
+		err = runE(input)
+		return e.IfNotNil(err)
+	}
+
+	err := BindCustom(cmd, f, input)
+	if err != nil {
+		return nil, e(err)
+	}
+	ConfigureHelpFuncs()
+	ConfigureCommandHelp(cmd)
+
+	return cmd, nil
+}
+
+// Binder is a utility for fluently building trees of commands with bindings.
+// Example:
+//
+//		 root := NewBinderC(
+//				&cobra.Command{
+//					Use:   "test",
+//					Short: "root command",
+//				}).
+//				AddCommand(
+//					NewBinder(
+//						&testOpts{},
+//						&cobra.Command{
+//							Use:     "a <domains>",
+//							Example: "test a x",
+//						},
+//						func(opts *testOpts) error {
+//							return opts.run()
+//						},
+//						nil),
+//					NewBinder(
+//						&testOpts{},
+//						&cobra.Command{
+//							Use:     "b <domains>",
+//							Example: "test b y",
+//						},
+//						func(opts *testOpts) error {
+//							return opts.run()
+//						},
+//						nil))
+//		if root.Error != nil {
+//			panic(root.Error)
+//		}
+//	 ... use root.Command
+type Binder struct {
+	Error   error
+	Command *cobra.Command
+}
+
+// NewBinderC constructs a new Binder with just a Command. This is useful for
+// commands that are only parents of other commands, like the root command.
+func NewBinderC(c *cobra.Command) *Binder {
+	return NewBinder[any](nil, c, nil, nil)
+}
+
+// NewBinder returns a Binder initialized by running BindRunE with the given parameters
+func NewBinder[T any](in *T, c *cobra.Command, runE func(*T) error, f Flagger) *Binder {
+	cmd, err := BindRunE(in, c, runE, f)
+	return &Binder{
+		Error:   errors.ClearStacktrace(err),
+		Command: cmd,
+	}
+}
+
+// AddCommand adds the commands of the given Binder instances to the command of
+// this Binder or append their error to the Error of this Binder if they have
+// errors.
+func (b *Binder) AddCommand(bound ...*Binder) *Binder {
+	for _, bn := range bound {
+		if bn.Error != nil {
+			b.Error = errors.Append(b.Error, bn.Error)
+		} else if b.Command != nil {
+			b.Command.AddCommand(bn.Command)
+		}
+	}
+	return b
 }

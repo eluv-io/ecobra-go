@@ -39,7 +39,7 @@ type myInput struct {
 }
 ```
 
-The `usage` attribute will be used by the command line help in the description of the flag.
+The `usage` attribute is used by the command line help in the description of the flag.
 
 ```
 type JsonToCsvSpec struct {

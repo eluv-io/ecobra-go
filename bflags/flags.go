@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+
+	"github.com/eluv-io/errors-go"
 )
 
 type cmdFlag string
@@ -24,16 +25,17 @@ const (
 )
 
 type FlagBond struct {
-	isArg      bool        // false for flags, true for args
-	Name       cmdFlag     // name of the flag
-	Shorthand  string      // one letter short hand or the empty sting for none
-	Value      interface{} // the default value (use zero value for no default)
-	Usage      string      // usage string : must not be empty
-	Required   bool        // true if the flag is required
-	Persistent bool        // true: the flag is available to the command as well as every command under the command
-	Hidden     bool        // true to set the flag as hidden
-	ArgOrder   int         // for flags used to bind args
-	CsvSlice   bool        // true for flags with comma separated string representation
+	isArg       bool        // false for flags, true for args
+	Name        cmdFlag     // name of the flag
+	Shorthand   string      // one letter shorthand or the empty string for none
+	Value       interface{} // the default value (use zero value for no default)
+	Usage       string      // usage string : must not be empty
+	Required    bool        // true if the flag is required
+	Persistent  bool        // true: the flag is available to the command as well as every command under the command
+	Hidden      bool        // true to set the flag as hidden
+	ArgOrder    int         // for flags used to bind args
+	CsvSlice    bool        // true for flags with comma separated string representation
+	Annotations []string    // annotations found as 'meta' tag
 }
 
 var nillableKinds = []reflect.Kind{
@@ -70,6 +72,14 @@ func isCsvSlice(object interface{}) bool {
 }
 
 func (f *FlagBond) CmdString() []string {
+	return f.cmdString(false)
+}
+
+// cmdString return the equivalent command line.
+// When f refers to a bool flag: if fullBoolFlag is false the returned value looks
+// like the command line (e.g. --xyz for a true value), otherwise fullBoolFlag is
+// true and the returned slice holds the flag name and value.
+func (f *FlagBond) cmdString(fullBoolFlag bool) []string {
 	v := f.Value
 	if isNil(v) {
 		return nil
@@ -99,7 +109,7 @@ func (f *FlagBond) CmdString() []string {
 	}
 
 	if !f.isArg {
-		if isBool {
+		if isBool && !fullBoolFlag {
 			// pflag.flag always set the NoOptDefVal of boolean flags to 'true'
 			if value == "false" {
 				return []string{"--" + string(f.Name) + "=" + value}
@@ -125,30 +135,45 @@ func (f *FlagBond) SetRequired(v bool) *FlagBond {
 	return f
 }
 
+func (f *FlagBond) HasAnnotation(s string) bool {
+	if f == nil {
+		return false
+	}
+	for _, a := range f.Annotations {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *FlagBond) MarshalJSON() ([]byte, error) {
 	type flagBond struct {
-		Name       cmdFlag     `json:"name"`
-		Shorthand  string      `json:"short_hand"`
-		Value      interface{} `json:"value,omitempty"`
-		Usage      string      `json:"usage"`
-		Required   bool        `json:"required,omitempty"`
-		Persistent bool        `json:"persistent,omitempty"`
-		Hidden     bool        `json:"hidden,omitempty"`
+		Name        cmdFlag     `json:"name"`
+		Shorthand   string      `json:"short_hand"`
+		Value       interface{} `json:"value,omitempty"`
+		Usage       string      `json:"usage"`
+		Required    bool        `json:"required,omitempty"`
+		Persistent  bool        `json:"persistent,omitempty"`
+		Hidden      bool        `json:"hidden,omitempty"`
+		Annotations []string    `json:"annotations"`
 	}
 	type argBond struct {
-		Name     cmdFlag     `json:"name"`
-		Value    interface{} `json:"value,omitempty"`
-		Usage    string      `json:"usage"`
-		ArgOrder int         `json:"arg_order"`
+		Name        cmdFlag     `json:"name"`
+		Value       interface{} `json:"value,omitempty"`
+		Usage       string      `json:"usage"`
+		ArgOrder    int         `json:"arg_order"`
+		Annotations []string    `json:"annotations"`
 	}
 	var jsn []byte
 	var err error
 	if f.isArg {
 		a := &argBond{
-			Name:     f.Name,
-			Value:    f.Value,
-			Usage:    f.Usage,
-			ArgOrder: f.ArgOrder,
+			Name:        f.Name,
+			Value:       f.Value,
+			Usage:       f.Usage,
+			ArgOrder:    f.ArgOrder,
+			Annotations: f.Annotations,
 		}
 		jsn, err = json.Marshal(a)
 		if err != nil {
@@ -156,13 +181,14 @@ func (f *FlagBond) MarshalJSON() ([]byte, error) {
 		}
 	} else {
 		a := &flagBond{
-			Name:       f.Name,
-			Shorthand:  f.Shorthand,
-			Value:      f.Value,
-			Usage:      f.Usage,
-			Required:   f.Required,
-			Persistent: f.Persistent,
-			Hidden:     f.Hidden,
+			Name:        f.Name,
+			Shorthand:   f.Shorthand,
+			Value:       f.Value,
+			Usage:       f.Usage,
+			Required:    f.Required,
+			Persistent:  f.Persistent,
+			Hidden:      f.Hidden,
+			Annotations: f.Annotations,
 		}
 		jsn, err = json.Marshal(a)
 		if err != nil {
@@ -182,7 +208,7 @@ func (s CmdFlags) String() string {
 	return string(bb)
 }
 
-// not intended to be called
+// Set is not intended to be called (but required by Value interface)
 func (s CmdFlags) Set(string) error {
 	return errors.E("flagset.Set", errors.K.Invalid)
 }
@@ -643,7 +669,7 @@ func (f *ArgSet) ArgUsages() string {
 	return sb.String()
 }
 
-// not intended to be called
+// Set is not intended to be called (but required by Value interface)
 func (f *ArgSet) Set(string) error {
 	return errors.E("argset.Set", errors.K.Invalid)
 }
@@ -653,6 +679,9 @@ func (f *ArgSet) Type() string {
 }
 
 func setCmdArgSet(cmd *cobra.Command, s []*FlagBond) {
+	if s == nil {
+		s = []*FlagBond{}
+	}
 	cmd.Flags().AddFlag(&flag.Flag{
 		Name:   argset,
 		Hidden: true,
@@ -804,7 +833,7 @@ func (f *inputValue) String() string {
 	return string(jsn)
 }
 
-// not intended to be called
+// Set is not intended to be called (but required by Value interface)
 func (f *inputValue) Set(string) error {
 	return errors.E("flagset.Set", errors.K.Invalid)
 }
@@ -845,7 +874,7 @@ func (f *ctxValue) String() string {
 	return string(jsn)
 }
 
-// not intended to be called
+// Set is not intended to be called (but required by Value interface)
 func (f *ctxValue) Set(string) error {
 	return errors.E("flags.Set", errors.K.Invalid)
 }

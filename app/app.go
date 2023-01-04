@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -8,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/eluv-io/errors-go"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 
 	"github.com/eluv-io/ecobra-go/bflags"
+	"github.com/eluv-io/errors-go"
 )
 
 func SpecOf(cmd *cobra.Command) *spec {
@@ -28,6 +29,8 @@ func SpecOf(cmd *cobra.Command) *spec {
 	return s
 }
 
+var _ = SpecOf
+
 // ----- Runtime -----
 
 // Ctor is the type of function creating an 'input' parameter for a command
@@ -37,10 +40,13 @@ type Ctor func() interface{}
 
 // Runfn is the type of function that a command shall execute at runtime. These
 // functions are expected to conform to the following prototype:
-//   func(ctx *CmdCtx, in interface{}) (interface{}, error)
+//
+//	func(ctx *CmdCtx, in interface{}) (interface{}, error)
+//
 // - At least one input parameter:
 //   - first of type *CmdCtx
 //   - optionally a second parameter that is the input of the command
+//
 // - 2 output parameters, the last one being an error
 type Runfn interface{}
 
@@ -85,9 +91,9 @@ func isRunFn(name string, fn interface{}) error {
 }
 
 // inputCtor returns the input of a command. If input is
-// - a function, it must be a constructor (func without parameter and a single
-//   return) the returned value of the function is returned as the input.
-// - otherwise input is returned unchanged
+//   - a function, it must be a constructor (func without parameter and a single
+//     return) the returned value of the function is returned as the input.
+//   - otherwise input is returned unchanged
 func inputCtor(input interface{}) (interface{}, error) {
 	e := errors.Template("input ctor", errors.K.Invalid)
 	fn := reflect.ValueOf(input)
@@ -136,6 +142,8 @@ func RtFunctions(
 }
 
 // ----- spec -----
+
+// SpecKey is the context key for the spec
 const SpecKey = "$spec"
 
 type spec struct {
@@ -162,14 +170,18 @@ func (s *spec) setFor(cmd *cobra.Command) {
 var _ flag.Value = (*spec)(nil)
 
 func (s *spec) String() string {
-	res, err := json.MarshalIndent(s, "", "  ")
+	buf := bytes.NewBuffer(make([]byte, 0))
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	err := enc.Encode(s)
 	if err != nil {
 		panic("Failed to marshal json: " + err.Error())
 	}
-	return string(res)
+	return string(buf.Bytes())
 }
 
-// not intended to be called
+// Set is needed to satisfy the Value interface but is not intended to be called
 func (s *spec) Set(string) error {
 	return errors.E("spec.Set", errors.K.Invalid)
 }
@@ -181,7 +193,7 @@ func (s *spec) Type() string {
 // ----- App -----
 
 type CobraFunction func(cmd *cobra.Command, args []string) error
-type CommandStart func(cmd *cobra.Command)
+type CommandStart func(cmd *cobra.Command, flagsAndArgs map[string]string, in interface{})
 type CommandEnd func(cmd *cobra.Command, out interface{}, err error)
 
 type App struct {
@@ -262,6 +274,11 @@ func (a *App) Cobra() (*cobra.Command, error) {
 	return a.root, nil
 }
 
+func (a *App) NewCobra() (*cobra.Command, error) {
+	a.root = nil
+	return a.Cobra()
+}
+
 func (a *App) configureHelp() {
 	// configure categories and template functions
 	if len(a.spec.Categories) > 0 {
@@ -272,35 +289,22 @@ func (a *App) configureHelp() {
 	} else {
 		AddTemplateFunc("categories", func() string { return "" })
 	}
-	AddTemplateFunc("arguments",
-		func(cmd *cobra.Command) string {
-			argSet, err := bflags.GetCmdArgSet(cmd)
-			if err != nil {
-				return err.Error()
-			}
-			return argSet.ArgUsages()
-		})
-	AddTemplateFunc("hasArgs",
-		func(cmd *cobra.Command) bool {
-			argSet, err := bflags.GetCmdArgSet(cmd)
-			if err != nil {
-				return false
-			}
-			return len(argSet.Flags) > 0
-		})
-	AddTemplateFunc("fullUsageString", fullUsageString)
+	bflags.ConfigureHelpFuncs()
 
 	// configure help
 	configureHelp(a.root)
 }
 
-func (a *App) Command(path []string) (*Cmd, error) {
+func (a *App) Command(path ...string) (*Cmd, error) {
 	e := errors.Template("Command", errors.K.Invalid, "path", strings.Join(path, ","))
 	if len(path) == 0 {
-		return nil, e("reason", "empty path")
+		return a.spec.CmdRoot, nil
 	}
-	if path[0] != a.root.Name() {
+	if path[0] != a.spec.CmdRoot.Name() {
 		return nil, e(errors.K.NotExist)
+	}
+	if len(path) == 1 {
+		return a.spec.CmdRoot, nil
 	}
 	return a.spec.CmdRoot.Sub(path[1:])
 }
@@ -315,6 +319,10 @@ func (a *App) SetCommandEnd(cmdEnd CommandEnd) {
 
 func (a *App) onExit() {
 	a.printResults("exit signal")
+}
+
+func (a *App) getResults() []*CmdResult {
+	return a.results
 }
 
 func (a *App) printResults(reason string) {
@@ -371,6 +379,7 @@ func (a *App) runStub(fn interface{}, name string) CobraFunction {
 			}
 			ctx.Set(CtxAddResultFn, arfn)
 			ctx.Set(CtxPrintResultFn, a.printResults)
+			ctx.Set(CtxGetResultFn, a.getResults)
 		}
 		m, err := bflags.SetArgs(cmd, args)
 		if err != nil {
@@ -394,7 +403,7 @@ func (a *App) runStub(fn interface{}, name string) CobraFunction {
 			return e(err)
 		}
 		if a.cmdStart != nil {
-			a.cmdStart(cmd)
+			a.cmdStart(cmd, bflags.GetFlagArgSet(cmd), m)
 		}
 
 		res, err := a.callFn(name, f, ctx, m)
@@ -469,6 +478,8 @@ func (a *App) callFn(name string, fn reflect.Value, params ...interface{}) (v []
 }
 
 // ----- Cmd -----
+
+// ValidatorCtor is a constructor validator
 type ValidatorCtor func(c *cobra.Command) func(c *cobra.Command, args []string) error
 
 type CobraFunc struct {
@@ -482,6 +493,11 @@ func CobraFnWithName(name string) CobraFunc {
 
 func CobraFn(fn CobraFunction) CobraFunc {
 	return CobraFunc{fn: fn}
+}
+
+func (c *CobraFunc) String() string {
+	ret, _ := c.MarshalText()
+	return string(ret)
 }
 
 // MarshalText implements custom marshaling using the string representation.
@@ -518,6 +534,11 @@ func RunFnWithName(name string) RunFunc {
 
 func RunFn(fn Runfn) RunFunc {
 	return RunFunc{fn: fn}
+}
+
+func (c *RunFunc) String() string {
+	ret, _ := c.MarshalText()
+	return string(ret)
 }
 
 // MarshalText implements custom marshaling using the string representation.
@@ -847,21 +868,113 @@ func (c *Cmd) ToCobra(parent *cobra.Command, f bflags.Flagger) (*cobra.Command, 
 	return cmd, nil
 }
 
-// Results book keeping
+type JCmd struct {
+	app                        *App
+	Use                        string            `json:"use"`
+	Aliases                    []string          `json:"aliases,omitempty"`
+	SuggestFor                 []string          `json:"suggest_for,omitempty"`
+	Short                      string            `json:"short"`
+	Long                       mstring           `json:"long,omitempty"`
+	Category                   string            `json:"category,omitempty"`
+	Example                    mstring           `json:"example,omitempty"`
+	ValidArgs                  []string          `json:"valid_args,omitempty"`
+	Args                       string            `json:"args,omitempty"`
+	ArgsValidator              ValidatorCtor     `json:"-"` // additional validator
+	ArgAliases                 []string          `json:"arg_aliases,omitempty"`
+	BashCompletionFunction     string            `json:"bash_completion_function,omitempty"`
+	Deprecated                 string            `json:"deprecated,omitempty"`
+	Hidden                     bool              `json:"hidden,omitempty"`
+	Annotations                map[string]string `json:"annotations,omitempty"`
+	Version                    string            `json:"version,omitempty"`
+	PersistentPreRunE          string            `json:"persistent_pre_run_e,omitempty"`
+	PreRunE                    string            `json:"pre_run_e,omitempty"`
+	RunE                       string            `json:"run_e,omitempty"`
+	PostRunE                   string            `json:"post_run_e,omitempty"`
+	PersistentPostRunE         string            `json:"persistent_post_run_e,omitempty"`
+	SilenceErrors              bool              `json:"silence_errors,omitempty"`
+	SilenceUsage               bool              `json:"silence_usage,omitempty"`
+	DisableFlagParsing         bool              `json:"disable_flag_parsing,omitempty"`
+	DisableAutoGenTag          bool              `json:"disable_auto_gen_tag,omitempty"`
+	DisableFlagsInUseLine      bool              `json:"disable_flags_in_use_line,omitempty"`
+	DisableSuggestions         bool              `json:"disable_suggestions,omitempty"`
+	SuggestionsMinimumDistance int               `json:"suggestions_minimum_distance,omitempty"`
+	TraverseChildren           bool              `json:"traverse_children,omitempty"`
+	InputCtor                  string            `json:"input_ctor,omitempty"`   // name of input in app's map
+	Input                      CmdInput          `json:"input,omitempty"`        // json of input or input object
+	SubCommands                []*Cmd            `json:"sub_commands,omitempty"` // sub commands
+}
+
+func (c *Cmd) MarshalJSON() ([]byte, error) {
+	jc := JCmd{
+		app:                        c.app,
+		Use:                        c.Use,
+		Aliases:                    c.Aliases,
+		SuggestFor:                 c.SuggestFor,
+		Short:                      c.Short,
+		Long:                       c.Long,
+		Category:                   c.Category,
+		Example:                    c.Example,
+		ValidArgs:                  c.ValidArgs,
+		Args:                       c.Args,
+		ArgsValidator:              c.ArgsValidator,
+		ArgAliases:                 c.ArgAliases,
+		BashCompletionFunction:     c.BashCompletionFunction,
+		Deprecated:                 c.Deprecated,
+		Hidden:                     c.Hidden,
+		Annotations:                c.Annotations,
+		Version:                    c.Version,
+		PersistentPreRunE:          c.PersistentPreRunE.String(),
+		PreRunE:                    c.PreRunE.String(),
+		RunE:                       c.RunE.String(),
+		PostRunE:                   c.PostRunE.String(),
+		PersistentPostRunE:         c.PersistentPostRunE.String(),
+		SilenceErrors:              c.SilenceErrors,
+		SilenceUsage:               c.SilenceUsage,
+		DisableFlagParsing:         c.DisableFlagParsing,
+		DisableAutoGenTag:          c.DisableAutoGenTag,
+		DisableFlagsInUseLine:      c.DisableFlagsInUseLine,
+		DisableSuggestions:         c.DisableSuggestions,
+		SuggestionsMinimumDistance: c.SuggestionsMinimumDistance,
+		TraverseChildren:           c.TraverseChildren,
+		InputCtor:                  c.InputCtor,
+		Input:                      c.Input,
+		SubCommands:                c.SubCommands,
+	}
+	ti := reflect.TypeOf(jc.Input)
+	if ti != nil && ti.Kind() == reflect.Func {
+		jc.Input = runtime.FuncForPC(reflect.ValueOf(jc.Input).Pointer()).Name()
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0))
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	err := enc.Encode(&jc)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// AddResultFn and PrintResultFn are function for results book keeping
 type AddResultFn func(key string, out interface{}, err error)
 type PrintResultFn func(results []*CmdResult)
 
 type CmdResult struct {
-	Key    string
-	Result interface{}
-	Error  error
+	Key    string      `json:"key"`
+	Result interface{} `json:"result,omitempty"`
+	Error  string      `json:"error,omitempty"`
 }
 
 func newCommandResult(key string, out interface{}, err error) *CmdResult {
+	serr := ""
+	if err != nil {
+		serr = fmt.Sprintf("%v", err)
+	}
 	return &CmdResult{
 		Key:    key,
 		Result: out,
-		Error:  err,
+		Error:  serr,
 	}
 }
 
@@ -887,7 +1000,7 @@ func (r *CmdResult) String() string {
 	ret := fmt.Sprintf("%s: %s", r.Key, res)
 
 	serr := ""
-	if r.Error != nil {
+	if len(r.Error) > 0 {
 		serr = fmt.Sprintf("error: %v", r.Error)
 	}
 	if serr != "" {

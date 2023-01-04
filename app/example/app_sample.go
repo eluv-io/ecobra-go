@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/eluv-io/ecobra-go/app"
 	"github.com/eluv-io/ecobra-go/bflags"
 	"github.com/eluv-io/errors-go"
-	"github.com/spf13/cobra"
 )
 
 type InputSample struct {
@@ -48,7 +49,7 @@ func cleanup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func cmdStart(c *cobra.Command) {
+func cmdStart(c *cobra.Command, flagsAndArgs map[string]string, in interface{}) {
 	// from now on errors are execution errors: don't print usage again
 	c.SilenceUsage = true
 	c.Root().SilenceUsage = true
