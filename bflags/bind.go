@@ -240,7 +240,33 @@ func GetFlagArgSet(c *cobra.Command) map[string]string {
 }
 
 // BindRunE binds the input parameter to the given command and sets the runE
-// parameter function as the function invoked by the RunE function of the cobra command.
+// parameter function as the function invoked by the RunE function of the cobra
+// command.
+// _Example_
+//
+//	type testOpts struct {
+//		Password string   `cmd:"flag,password,password for the user's key,x"`
+//		NoCert   bool     `cmd:"flag,no-cert,don't add certificate to the ssh-agent"`
+//		Domains  []string `cmd:"arg,domains,name of the ssh domains,0"`
+//		done     bool
+//	}
+//
+//	cmd, err := BindRunE(
+//		&testOpts{},
+//		&cobra.Command{
+//			Use:     "test <domains>",
+//			Short:   "explanation short",
+//			Args:    cobra.MinimumNArgs(1),
+//			Example: "test a b",
+//		},
+//		func(opts *testOpts) error {
+//			return opts.run()
+//		},
+//		nil)
+//	if err != nil {
+//		panic(err)
+//	}
+//	... use cmd
 func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger) (*cobra.Command, error) {
 	e := errors.Template("BindRunE", errors.K.Invalid,
 		"input", input,
@@ -277,14 +303,11 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 			return e(err)
 		}
 
-		// use interface{} to call fmt.Sprintf to avoid compilation error:
-		//   fmt.Sprintf format %p has arg input of wrong type T
-		var i interface{} = input
-		if fmt.Sprintf("%p", in) != fmt.Sprintf("%p", i) {
+		if in != input {
 			return e(errors.K.Internal,
 				"reason", "wrong value retrieved from SetupCmdArgs",
 				"in", fmt.Sprintf("%p", in),
-				"input", fmt.Sprintf("%p", i))
+				"input", fmt.Sprintf("%p", input))
 		}
 
 		err = runE(input)
@@ -301,7 +324,7 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 	return cmd, nil
 }
 
-// Binder is a utility for building trees of commands with bindings.
+// Binder is a utility for fluently building trees of commands with bindings.
 // Example:
 //
 //		 root := NewBinderC(
