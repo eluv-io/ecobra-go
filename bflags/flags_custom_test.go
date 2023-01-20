@@ -1,12 +1,12 @@
 package bflags
 
 import (
-	"flag"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	flag "github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,7 +47,7 @@ func newPathValue(val path, p *path) *pathValue {
 
 func (b *pathValue) Set(s string) error {
 	pp := strings.Split(s, "/")
-	*b = pathValue(pp)
+	*b = pp
 	return nil
 }
 
@@ -56,7 +56,7 @@ func (b *pathValue) Type() string {
 }
 
 func (b *pathValue) String() string {
-	return strings.Join([]string(*b), "/")
+	return strings.Join(*b, "/")
 }
 
 type MyObject struct {

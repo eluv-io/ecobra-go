@@ -3,6 +3,7 @@ package bflags
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -36,19 +37,36 @@ import (
 // A 'meta' tag can be added to convey annotations with the bound tag:
 //
 //	`cmd:"flag,config,file name,c" meta:"file,non-empty"`
+//
+// A 'viper' tag can be used to specify the viper key
+//
+//	`cmd:"flag,config,file name,c" meta:"file,non-empty" viper:"node.file"`
 func Bind(c *cobra.Command, v interface{}) error {
 	return BindCustom(c, nil, v)
 }
 
 // BindCustom is like Bind and allows a custom Flagger
 func BindCustom(c *cobra.Command, f Flagger, v interface{}) error {
+	return BindCustomViper(c, f, v, nil)
+}
+
+// BindCustomViper is like BindCustom and allows viper options
+func BindCustomViper(c *cobra.Command, f Flagger, v interface{}, vip *ViperOpts) error {
 	if v == nil {
 		setCmdInput(c, nil)
 		return nil
 	}
+	if vip != nil {
+		err := vip.validate()
+		if err != nil {
+			return err
+		}
+	}
 	e := newFlagsBinder(c, f)
 
-	err := e.bind(v, bindOpts{})
+	err := e.bind(v, bindOpts{
+		vip: vip,
+	})
 	if err != nil {
 		path := append([]string{}, c.Name())
 		r := c.Parent()
@@ -268,6 +286,10 @@ func GetFlagArgSet(c *cobra.Command) map[string]string {
 //	}
 //	... use cmd
 func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger) (*cobra.Command, error) {
+	return BindRunEViper(input, cmd, runE, f, nil)
+}
+
+func BindRunEViper[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger, vip *ViperOpts) (*cobra.Command, error) {
 	e := errors.Template("BindRunE", errors.K.Invalid,
 		"input", input,
 		"command", cmd.Use)
@@ -280,9 +302,6 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 	if input == nil {
 		return cmd, nil
 	}
-	if runE == nil {
-		return nil, e("reason", "nil runE function")
-	}
 
 	if reflect.TypeOf(input).Kind() != reflect.Ptr ||
 		reflect.ValueOf(input).Kind() != reflect.Ptr ||
@@ -294,30 +313,85 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 			"input_value_elem_kind", reflect.ValueOf(input).Elem().Kind())
 	}
 
-	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		funcName := runtime.FuncForPC(reflect.ValueOf(runE).Pointer()).Name()
-		e := errors.Template(funcName, errors.K.Invalid)
+	if runE != nil {
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			funcName := runtime.FuncForPC(reflect.ValueOf(runE).Pointer()).Name()
+			e := errors.Template(funcName, errors.K.Invalid)
 
-		in, err := SetupCmdArgs(cmd, args, reflect.TypeOf(input))
-		if err != nil {
-			return e(err)
+			in, err := SetupCmdArgs(cmd, args, reflect.TypeOf(input))
+			if err != nil {
+				return e(err)
+			}
+
+			if in != input {
+				return e(errors.K.Internal,
+					"reason", "wrong value retrieved from SetupCmdArgs",
+					"in", fmt.Sprintf("%p", in),
+					"input", fmt.Sprintf("%p", input))
+			}
+
+			err = runE(input)
+			return e.IfNotNil(err)
 		}
-
-		if in != input {
-			return e(errors.K.Internal,
-				"reason", "wrong value retrieved from SetupCmdArgs",
-				"in", fmt.Sprintf("%p", in),
-				"input", fmt.Sprintf("%p", input))
-		}
-
-		err = runE(input)
-		return e.IfNotNil(err)
 	}
 
-	err := BindCustom(cmd, f, input)
+	err := BindCustomViper(cmd, f, input, vip)
 	if err != nil {
 		return nil, e(err)
 	}
+
+	if vip != nil && vip.Viper != nil && !vip.Loaded && cmd.LocalFlags().Lookup(vip.ConfigFlag) != nil {
+		// set the default value to viper
+		pf := cmd.LocalFlags().Lookup(vip.ConfigFlag)
+		config := pf.Value.String()
+		filename := filepath.Base(config)
+		vip.Viper.SetConfigName(filename[:len(filename)-len(filepath.Ext(filename))])
+
+		// the passed-in command may already have a PersistentPreRunE
+		preRunE := cmd.PersistentPreRunE
+		cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+			e := errors.TemplateNoTrace("readConfig", errors.K.Invalid,
+				"config_flag", vip.ConfigFlag)
+			pf := cmd.Flag(vip.ConfigFlag)
+			if pf == nil {
+				return e("reason", "config flag not found")
+			}
+			// use the flag value (either set from the command line or its default)
+			config := pf.Value.String()
+			filename := filepath.Base(config)
+			vip.Viper.SetConfigName(filename[:len(filename)-len(filepath.Ext(filename))])
+			vip.Viper.AddConfigPath(filepath.Dir(config))
+
+			err = vip.Viper.ReadInConfig()
+			if err != nil {
+				return e(err)
+			}
+			// now update flags that were NOT set via the command line
+			for fn, pf := range vip.viperFlags {
+				if !pf.Changed {
+					value := vip.Viper.GetString(fn)
+					if _, ok := pf.Value.(flag.SliceValue); ok {
+						err = replaceSliceValue(pf, value)
+					} else {
+						err = pf.Value.Set(value)
+					}
+					if err != nil {
+						return e(err)
+					}
+				}
+			}
+
+			// run the existing PersistentPreRunE if any
+			if preRunE != nil {
+				err = preRunE(cmd, args)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
 	ConfigureHelpFuncs()
 	ConfigureCommandHelp(cmd)
 
@@ -360,6 +434,8 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 type Binder struct {
 	Error   error
 	Command *cobra.Command
+	flagger Flagger
+	vip     *ViperOpts
 }
 
 // NewBinderC constructs a new Binder with just a Command. This is useful for
@@ -370,10 +446,18 @@ func NewBinderC(c *cobra.Command) *Binder {
 
 // NewBinder returns a Binder initialized by running BindRunE with the given parameters
 func NewBinder[T any](in *T, c *cobra.Command, runE func(*T) error, f Flagger) *Binder {
-	cmd, err := BindRunE(in, c, runE, f)
+	return NewBinderViper(in, c, runE, f, nil)
+}
+
+// NewBinderViper returns a Binder initialized by running BindRunE with the given
+// parameters and viper options
+func NewBinderViper[T any](in *T, c *cobra.Command, runE func(*T) error, f Flagger, vip *ViperOpts) *Binder {
+	cmd, err := BindRunEViper(in, c, runE, f, vip)
 	return &Binder{
 		Error:   errors.ClearStacktrace(err),
 		Command: cmd,
+		flagger: f,
+		vip:     vip,
 	}
 }
 
@@ -389,4 +473,34 @@ func (b *Binder) AddCommand(bound ...*Binder) *Binder {
 		}
 	}
 	return b
+}
+
+// ChildBinder return a Binder for the given child
+// note: doing this:
+//
+//	func (b *Binder) ChildBinder[T any](bn *Child[T]) *Binder{...}
+//
+// is not possible since "Method cannot have type parameters"
+func ChildBinder[T any](b *Binder, bn *Child[T]) *Binder {
+	cmd, err := BindRunEViper[T](bn.In, bn.C, bn.RunE, b.flagger, b.vip)
+	return &Binder{
+		Error:   errors.ClearStacktrace(err),
+		Command: cmd,
+		flagger: b.flagger,
+		vip:     b.vip,
+	}
+}
+
+type Child[T any] struct {
+	In   *T
+	C    *cobra.Command
+	RunE func(*T) error
+}
+
+func NewChild[T any](in *T, c *cobra.Command, runE func(*T) error) *Child[T] {
+	return &Child[T]{
+		In:   in,
+		C:    c,
+		RunE: runE,
+	}
 }

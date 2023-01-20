@@ -36,6 +36,7 @@ type FlagBond struct {
 	ArgOrder    int         // for flags used to bind args
 	CsvSlice    bool        // true for flags with comma separated string representation
 	Annotations []string    // annotations found as 'meta' tag
+	Viper       string      // viper key found as 'viper' tag
 }
 
 var nillableKinds = []reflect.Kind{
@@ -257,14 +258,18 @@ func (s CmdFlags) Get(name string) (*FlagBond, bool) {
 	return s.get(cmdFlag(name))
 }
 
-func (s CmdFlags) ConfigureCmd(cmd *cobra.Command, custom Flagger) error {
+func (s CmdFlags) ConfigureCmd(cmd *cobra.Command, custom Flagger, w ...*ViperOpts) error {
 	if cmd == nil {
 		return errors.E("configure cmd", errors.K.Invalid,
 			"reason", "cmd is nil")
 	}
+	var vip *ViperOpts
+	if len(w) > 0 {
+		vip = w[0]
+	}
 	for k, v := range s {
 		v.Name = k
-		_, err := s.configureFlag(cmd, custom, v)
+		_, err := s.configureFlag(cmd, custom, v, vip)
 		if err != nil {
 			return err
 		}
@@ -273,21 +278,9 @@ func (s CmdFlags) ConfigureCmd(cmd *cobra.Command, custom Flagger) error {
 	return nil
 }
 
-// PENDING: not used so far - remove ?
-func (s CmdFlags) configure(cmd *cobra.Command, name cmdFlag) (interface{}, error) {
-	if cmd == nil {
-		return nil, errors.E("configure flags", errors.K.Invalid,
-			"reason", "cmd is nil",
-			"name", name)
-	}
-	v, ok := s.get(name)
-	if !ok {
-		return nil, errors.E("configure flags", errors.K.NotExist, "name", name)
-	}
-	return s.configureFlag(cmd, nil, v)
-}
-
-func (s CmdFlags) configureFlag(cmd *cobra.Command, custom Flagger, v *FlagBond) (interface{}, error) {
+func (s CmdFlags) configureFlag(cmd *cobra.Command, custom Flagger, v *FlagBond, vip *ViperOpts) (interface{}, error) {
+	e := errors.Template("configureFlag", errors.K.Invalid,
+		"flag", v.Name)
 
 	var pflags *flag.FlagSet
 	if v.Persistent {
@@ -313,7 +306,7 @@ func (s CmdFlags) configureFlag(cmd *cobra.Command, custom Flagger, v *FlagBond)
 		var err error
 		r, err = s.makeFlag(pflags, v)
 		if err != nil {
-			return nil, err
+			return nil, e(err)
 		}
 	}
 
@@ -325,14 +318,95 @@ func (s CmdFlags) configureFlag(cmd *cobra.Command, custom Flagger, v *FlagBond)
 			err = cmd.MarkFlagRequired(flagName)
 		}
 		if err != nil {
-			return nil, err
+			return nil, e(err)
 		}
 	}
-	if v.Hidden {
-		pflags.Lookup(flagName).Hidden = true
+	if v.Hidden || v.Viper != "" {
+		pf := pflags.Lookup(flagName)
+		if v.Hidden {
+			pf.Hidden = true
+		}
+		if vip != nil && v.Viper != "" {
+			isSet := vip.Viper.IsSet(v.Viper)
+			value := vip.Viper.GetString(v.Viper)
+			err := vip.Viper.BindPFlag(v.Viper, pf)
+			if err != nil {
+				return nil, e(err)
+			}
+			vip.viperFlags[v.Viper] = pf
+			// since we are binding, set value from viper only if viper was
+			// already loaded (isSet is true)
+			if isSet {
+				if _, ok := pf.Value.(flag.SliceValue); ok {
+					err = replaceSliceValue(pf, value)
+				} else {
+					err = pf.Value.Set(value)
+				}
+				if err != nil {
+					return nil, e(err)
+				}
+			}
+		}
 	}
 
 	return r, nil
+}
+
+// replaceSliceValue replaces the value in a SliceValue flag. This is made because
+// the behavior of flag.SliceValue implementations in the pflag package is to
+// append new values to existing ones once the Set function has been called.
+// Implementations in package pflag have a 'changed' field that is set to true
+// at the first call to Set.
+// In our case, this meant that once the values from viper were Set, then when
+// the user used the flag to set new values, they would have been appended to
+// the ones set from viper.
+func replaceSliceValue(pf *flag.Flag, v string) error {
+	sliceValue, ok := pf.Value.(flag.SliceValue)
+	if !ok {
+		// for safety, but we should never go there
+		return errors.Str(fmt.Sprintf("not a slice value type: %s (flag: %s)",
+			pf.Value.Type(),
+			pf.Name))
+	}
+	// implementation creates a dummy flag set to avoid parsing the input string
+	// into a slice and make sure the pflag parsing functions are used
+	flagSet := flag.NewFlagSet("dummy", flag.ContinueOnError)
+
+	name := "x"
+	var f *flag.Flag
+	switch pf.Value.Type() {
+	case "durationSlice":
+		flagSet.DurationSlice(name, []time.Duration{}, "")
+	case "stringSlice":
+		flagSet.StringSlice(name, []string{}, "")
+	case "ipSlice":
+		flagSet.IPSlice(name, []net.IP{}, "")
+	case "intSlice":
+		flagSet.IntSlice(name, []int{}, "")
+	case "stringArray":
+		flagSet.StringArray(name, []string{}, "")
+	case "float64Slice":
+		flagSet.Float64Slice(name, []float64{}, "")
+	case "float32Slice":
+		flagSet.Float32Slice(name, []float32{}, "")
+	case "boolSlice":
+		flagSet.BoolSlice(name, []bool{}, "")
+	case "int64Slice":
+		flagSet.Int64Slice(name, []int64{}, "")
+	case "int32Slice":
+		flagSet.Int32Slice(name, []int32{}, "")
+	case "uintSlice":
+		flagSet.UintSlice(name, []uint{}, "")
+	default:
+		return errors.Str(fmt.Sprintf("unknown slice value type: %s", pf.Value.Type()))
+	}
+	f = flagSet.Lookup(name)
+	err := f.Value.Set(v)
+	if err != nil {
+		return err
+	}
+	sv := f.Value.(flag.SliceValue)
+	return sliceValue.Replace(sv.GetSlice())
 }
 
 func (s CmdFlags) makeFlag(pflags *flag.FlagSet, v *FlagBond) (interface{}, error) {

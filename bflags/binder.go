@@ -25,6 +25,7 @@ const (
 var log = elog.Get(bflagsLogPath)
 
 type bindOpts struct {
+	vip *ViperOpts
 }
 
 // An flagsBinder binds flags and args into a *cobra.Command.
@@ -74,7 +75,7 @@ func (e *flagsBinder) bind(v interface{}, opts bindOpts) (err error) {
 			"kind", val.Kind().String())
 	}
 	e.reflectValue(val.Elem(), opts)
-	err = e.cmdFlags.ConfigureCmd(e.cmd, e.custom)
+	err = e.cmdFlags.ConfigureCmd(e.cmd, e.custom, opts.vip)
 	if err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func (e *flagsBinder) bind(v interface{}, opts bindOpts) (err error) {
 	}
 	for i, fb := range e.argFlags {
 		fb.Hidden = true
-		_, err = e.cmdFlags.configureFlag(e.cmd, e.custom, fb)
+		_, err = e.cmdFlags.configureFlag(e.cmd, e.custom, fb, opts.vip)
 		if err != nil {
 			return err
 		}
@@ -156,6 +157,7 @@ func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
 		Hidden:      hidden,
 		ArgOrder:    order,
 		Annotations: spec.getAnnotations(),
+		Viper:       spec.getViper(),
 	}
 
 	if spec.kind() == flagTag {
@@ -545,10 +547,11 @@ cmd:"flag,id,content id, i,true,true,true"
 meta:"val1,val2"
 */
 const (
-	cmdTag  = "cmd"
-	argTag  = "arg"
-	flagTag = "flag"
-	metaTag = "meta"
+	cmdTag   = "cmd"
+	argTag   = "arg"
+	flagTag  = "flag"
+	metaTag  = "meta"
+	viperTag = "viper"
 )
 
 type cmdSpec interface {
@@ -557,6 +560,7 @@ type cmdSpec interface {
 	setName(s string)
 	getDescription() string
 	getAnnotations() []string
+	getViper() string
 }
 
 // cmd:"arg,[name, description, [order]]"
@@ -565,6 +569,7 @@ type argSpec struct {
 	description string   // description
 	order       int      // optional order on command line
 	annotations []string // annotations
+	viper       string   // viper key
 }
 
 func (a *argSpec) kind() string {
@@ -584,6 +589,10 @@ func (a *argSpec) getAnnotations() []string {
 	return a.annotations
 }
 
+func (a *argSpec) getViper() string {
+	return a.viper
+}
+
 // cmd:"flag,name[, description, short hand, persistent=false, required=false, hidden=false]" meta:"val1,val2,val3"
 type flagSpec struct {
 	name        string   // name of the flag or arg parameter
@@ -593,6 +602,7 @@ type flagSpec struct {
 	required    bool     // true if the flag is required
 	hidden      bool     // true if the flag is hidden
 	annotations []string // annotations
+	viper       string   // viper key
 }
 
 func (a *flagSpec) kind() string {
@@ -610,6 +620,9 @@ func (a *flagSpec) getDescription() string {
 }
 func (a *flagSpec) getAnnotations() []string {
 	return a.annotations
+}
+func (a *flagSpec) getViper() string {
+	return a.viper
 }
 
 // A field represents a single field found in a struct.
@@ -834,6 +847,8 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 		annotations = splitString(annot)
 	}
 
+	vip := strings.Trim(sf.Tag.Get(viperTag), " ")
+
 	switch kind {
 	case "":
 		fallthrough //default to 'arg'
@@ -847,6 +862,7 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 			description: description,
 			order:       order,
 			annotations: annotations,
+			viper:       vip,
 		}
 	case flagTag:
 		persistent, _ := strconv.ParseBool(opts.At(3))
@@ -860,6 +876,7 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 			required:    required,
 			hidden:      hidden,
 			annotations: annotations,
+			viper:       vip,
 		}
 	default:
 		return nil
