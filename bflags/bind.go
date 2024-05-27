@@ -269,11 +269,11 @@ func GetFlagArgSet(c *cobra.Command) map[string]string {
 //	... use cmd
 func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagger) (*cobra.Command, error) {
 	e := errors.Template("BindRunE", errors.K.Invalid,
-		"input", input,
-		"command", cmd.Use)
+		"input", input)
 	if cmd == nil {
 		return nil, e("reason", "nil command  not allowed")
 	}
+	e = e.Add("command", cmd.Use)
 	if input == nil && runE != nil {
 		return nil, e("reason", "nil input with non nil runE function")
 	}
@@ -311,6 +311,15 @@ func BindRunE[T any](input *T, cmd *cobra.Command, runE func(*T) error, f Flagge
 		}
 
 		err = runE(input)
+		if err != nil {
+			if x, ok := in.(ErrorSilencer); ok && x.SilenceErrors() {
+				cmd.SilenceErrors = true
+			}
+			if x, ok := in.(ErrorTraceRemover); ok && x.NoTrace() {
+				e = errors.TemplateNoTrace(funcName, errors.K.Invalid)
+				err = errors.ClearStacktrace(err)
+			}
+		}
 		return e.IfNotNil(err)
 	}
 
