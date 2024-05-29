@@ -1,3 +1,4 @@
+// Package main provides an example in how to use bflags.BindRunE
 package main
 
 import (
@@ -44,7 +45,6 @@ func Execute() error {
 
 func main() {
 	if err := Execute(); err != nil {
-		fmt.Println(err)
 		os.Exit(1)
 	}
 }
