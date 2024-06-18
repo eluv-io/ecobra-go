@@ -609,6 +609,129 @@ func TestVariadicInt(t *testing.T) {
 	}, v)
 }
 
+// TestVariadicStringMultiple shows the legacy behavior when using a variadic
+// string as the last arguments of a command line
+func TestVariadicStringMultiple(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestVariadicStringStruct{
+		Hashes: []string{"hip", "hop"},
+	}
+	err := Bind(c, sts)
+	require.NoError(t, err)
+
+	// legacy behavior
+	v, err := SetArgs(c, []string{"one", "two", "three,four", "five,six"})
+	require.NoError(t, err)
+	aos, ok := v.(*TestVariadicStringStruct)
+	require.True(t, ok)
+	require.Equal(t, "one", aos.Token)
+	require.Equal(t, "two", aos.ID)
+	require.Equal(t, []string{"three", "four", "five", "six"}, aos.Hashes)
+}
+
+type TestVariadicStringArgStruct struct {
+	ID     string   `cmd:"arg,,,1"`
+	Token  string   `cmd:"arg,,,0"`
+	Hashes []string `cmd:"args,,,2"`
+	Ignore string
+}
+
+func TestVariadicStringArgMultiline(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestVariadicStringArgStruct{
+		Hashes: []string{"hip", "hop"},
+	}
+	err := Bind(c, sts)
+	require.NoError(t, err)
+
+	v, err := SetArgs(c, []string{"one", "two", "three,four", `five
+six`})
+	require.NoError(t, err)
+	aos, ok := v.(*TestVariadicStringArgStruct)
+	require.True(t, ok)
+	require.Equal(t, "one", aos.Token)
+	require.Equal(t, "two", aos.ID)
+	require.Equal(t, []string{"three,four", `five
+six`}, aos.Hashes)
+
+}
+
+type TestStringArgAsFlagStruct struct {
+	ID     string `cmd:"flag,id,description"`
+	Token  string `cmd:"args,,,0"`
+	Ignore string
+}
+
+// TestStringArgAsFlag shows that binding a StringArg to a flag or as a single
+// arg fails.
+func TestStringArgAsFlag(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestStringArgAsFlagStruct{
+		ID:    "xyz",
+		Token: "hip",
+	}
+	err := Bind(c, sts)
+	require.NoError(t, err)
+
+	v, err := SetArgs(c, []string{"one", "two"})
+	require.NoError(t, err)
+	aos, ok := v.(*TestStringArgAsFlagStruct)
+	require.True(t, ok)
+	require.Equal(t, "xyz", aos.ID)
+	require.Equal(t, "one", aos.Token)
+}
+
+type TestStringArgsFailStruct struct {
+	ID     string   `cmd:"flag,id,description"`
+	Token  []string `cmd:"args,,,0"`
+	Others []string `cmd:"args,,,1"`
+	Ignore string
+}
+
+// TestStringArgsBindFails shows that binding an 'args' to arg that is not the
+// last one fails.
+func TestStringArgsBindFails(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestStringArgsFailStruct{
+		ID: "xyz",
+	}
+	err := Bind(c, sts)
+	require.Error(t, err)
+}
+
+type TestIntArgsStruct struct {
+	Name   string `cmd:"flag,name,description"`
+	IDs    []int  `cmd:"args,,,0"`
+	Ignore string
+}
+
+// TestIntArgs shows binding 'args' to an []int.
+func TestIntArgsBind(t *testing.T) {
+	c := &cobra.Command{
+		Use: "dontUse",
+	}
+	sts := &TestIntArgsStruct{
+		Name: "xyz",
+	}
+	err := Bind(c, sts)
+	require.NoError(t, err)
+
+	v, err := SetArgs(c, []string{"1", "2"})
+	require.NoError(t, err)
+	aos, ok := v.(*TestIntArgsStruct)
+	require.True(t, ok)
+	require.Equal(t, "xyz", aos.Name)
+	require.Equal(t, []int{1, 2}, aos.IDs)
+}
+
 type TestCommonSliceStruct struct {
 	Hashes []string `cmd:"flag"`
 	Ints   []int    `cmd:"flag"`
@@ -818,7 +941,8 @@ type TestFlagAnonStruct struct {
 }
 
 // NOTE: the anonymous field needs to be initialized !
-// 		 otherwise no binding occurs
+//
+//	otherwise no binding occurs
 func emptyTestFlagAnonStruct() *TestFlagAnonStruct {
 	return &TestFlagAnonStruct{worker: &worker{}}
 }

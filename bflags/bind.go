@@ -126,11 +126,20 @@ func SetArgs(c *cobra.Command, args []string) (interface{}, error) {
 				if arg == "" {
 					continue
 				}
+
 				// support for variadic args with slices arg
+				fb := argset.Flags[i]
 				if i == len(argset.Flags)-1 && len(args) > len(argset.Flags) && isSliceValue(f) {
-					arg = strings.Join(args[i:], ",")
+					if ssv, ok := f.Value.(flag.SliceValue); ok && fb.ArgsSlice {
+						err = ssv.Replace(args[i:])
+					} else {
+						// legacy behavior relying on CSV parsing
+						err = f.Value.Set(strings.Join(args[i:], ","))
+					}
+				} else {
+					err = f.Value.Set(arg)
 				}
-				err = f.Value.Set(arg)
+
 				if err != nil {
 					return nil, ex(err)
 				}

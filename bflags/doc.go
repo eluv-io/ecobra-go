@@ -5,9 +5,12 @@
 
 		Syntax
 
-		Tag are specified using 'cmd' followed by either 'flag' or 'arg':
+		Tag are specified using 'cmd' followed by either 'flag', 'arg' or 'args':
 			flag, name, usage, shorthand, persistent, required, hidden
 			arg,  name, usage, order
+		The args tag is identical to 'arg' but may be specified only for the last
+		argument of the command and is useful for slice argument (variadic arguments)
+		When used, value are set without CSV parsing.
 
 		sample:
 			flag  `cmd:"flag,id,content id,i,true,true,false"`
