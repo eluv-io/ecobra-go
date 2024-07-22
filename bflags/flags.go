@@ -34,6 +34,7 @@ type FlagBond struct {
 	Persistent  bool        // true: the flag is available to the command as well as every command under the command
 	Hidden      bool        // true to set the flag as hidden
 	ArgOrder    int         // for flags used to bind args
+	ArgsSlice   bool        // for flags used to bind slice args
 	CsvSlice    bool        // true for flags with comma separated string representation
 	Annotations []string    // annotations found as 'meta' tag
 }
@@ -163,6 +164,7 @@ func (f *FlagBond) MarshalJSON() ([]byte, error) {
 		Value       interface{} `json:"value,omitempty"`
 		Usage       string      `json:"usage"`
 		ArgOrder    int         `json:"arg_order"`
+		ArgSlice    bool        `json:"arg_slice,omitempty"`
 		Annotations []string    `json:"annotations"`
 	}
 	var jsn []byte
@@ -173,6 +175,7 @@ func (f *FlagBond) MarshalJSON() ([]byte, error) {
 			Value:       f.Value,
 			Usage:       f.Usage,
 			ArgOrder:    f.ArgOrder,
+			ArgSlice:    f.ArgsSlice,
 			Annotations: f.Annotations,
 		}
 		jsn, err = json.Marshal(a)

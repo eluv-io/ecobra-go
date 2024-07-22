@@ -108,6 +108,12 @@ func (e *flagsBinder) bind(v interface{}, opts bindOpts) (err error) {
 			argf[i] = fb
 		}
 	}
+	for i, fb := range argf {
+		if fb.ArgsSlice && i != len(argf)-1 {
+			return ex("reason", "'args' may be specified for the last arg only",
+				"found at order", fb.ArgOrder)
+		}
+	}
 	setCmdArgSet(e.cmd, argf)
 	setCmdInput(e.cmd, v)
 
@@ -134,6 +140,7 @@ func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
 	hidden := false
 	order := -1
 	isArg := false
+	slice := false
 	if spec.kind() == flagTag {
 		short = spec.(*flagSpec).shorthand
 		persistent = spec.(*flagSpec).persistent
@@ -142,6 +149,7 @@ func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
 	} else {
 		isArg = true
 		order = spec.(*argSpec).order
+		slice = spec.(*argSpec).slice
 	}
 
 	name := cmdFlag(spec.getName())
@@ -155,6 +163,7 @@ func (e *flagsBinder) setFlagBound(ptr interface{}, spec cmdSpec) {
 		Persistent:  persistent,
 		Hidden:      hidden,
 		ArgOrder:    order,
+		ArgsSlice:   slice,
 		Annotations: spec.getAnnotations(),
 	}
 
@@ -547,6 +556,7 @@ meta:"val1,val2"
 const (
 	cmdTag  = "cmd"
 	argTag  = "arg"
+	argsTag = "args"
 	flagTag = "flag"
 	metaTag = "meta"
 )
@@ -564,11 +574,16 @@ type argSpec struct {
 	name        string   // name of the flag or arg parameter
 	description string   // description
 	order       int      // optional order on command line
+	slice       bool     // true for variadic args
 	annotations []string // annotations
 }
 
 func (a *argSpec) kind() string {
 	return argTag
+}
+
+func (a *argSpec) isSlice() bool {
+	return a.slice
 }
 
 func (a *argSpec) getName() string {
@@ -837,16 +852,21 @@ func parseFieldTag(sf reflect.StructField) cmdSpec {
 	switch kind {
 	case "":
 		fallthrough //default to 'arg'
-	case argTag:
+	case argTag, argsTag:
 		order, err := strconv.Atoi(opts.At(2))
 		if err != nil {
 			order = -1
+		}
+		slice := false
+		if kind == argsTag {
+			slice = true
 		}
 		return &argSpec{
 			name:        name,
 			description: description,
 			order:       order,
 			annotations: annotations,
+			slice:       slice,
 		}
 	case flagTag:
 		persistent, _ := strconv.ParseBool(opts.At(3))
