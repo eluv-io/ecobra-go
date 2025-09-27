@@ -148,3 +148,13 @@ func main() {
 ```
 
 See [app_sample.go](app/example/app_sample.go) for a fully running example (the above).
+
+### Similar projects
+
+* https://github.com/urfave/sflags
+* reported in `sflags` project page
+  * https://github.com/jaffee/commandeer
+  * https://github.com/anacrolix/tagflag
+  * https://github.com/jessevdk/go-flags
+* https://github.com/alexflint/go-arg
+* https://github.com/alecthomas/kong
